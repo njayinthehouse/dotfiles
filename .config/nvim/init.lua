@@ -1,6 +1,7 @@
 vim.g.loaded_netrw = 1
 vim.g.loaded_netrwPlugin = 1
 
+-- nvim <dir> opens a terminal at that <dir>
 vim.api.nvim_create_autocmd("VimEnter", {
   callback = function()
     local path = vim.api.nvim_buf_get_name(0)
