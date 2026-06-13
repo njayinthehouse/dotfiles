@@ -28,6 +28,35 @@ alias learned='sweettalk learned'
 # Version control for dotfiles
 alias dot='git --git-dir=$HOME/.dotfiles --work-tree=$HOME'
 
+# wifi — list networks / connect / disconnect (NetworkManager). A function, not
+# an alias, so it can dispatch on the subcommand. The wifi device is discovered
+# rather than hardcoded.
+wifi() {
+  local dev radio conn
+  dev=$(nmcli -t -f DEVICE,TYPE device status | awk -F: '$2=="wifi"{print $1; exit}')
+  case "$1" in
+    ""|status)      # show radio state and what we're connected to
+      radio=$(nmcli radio wifi)
+      if [[ $radio != enabled ]]; then
+        echo "wifi: off"
+      else
+        conn=$(nmcli -t -f GENERAL.CONNECTION device show "$dev" 2>/dev/null | cut -d: -f2)
+        if [[ -n $conn && $conn != "--" ]]; then
+          echo "wifi: on — connected to $conn"
+        else
+          echo "wifi: on — not connected"
+        fi
+      fi ;;
+    list|ls)        nmcli device wifi list ;;
+    connect|c)      shift; nmcli --ask device wifi connect "$@" ;;
+    disconnect|d)   nmcli device disconnect "$dev" ;;
+    on)             nmcli radio wifi on ;;
+    off)            nmcli radio wifi off ;;
+    help|-h|--help) print "usage: wifi [status | list | connect <ssid> | disconnect | on | off | help]" ;;
+    *) print -u2 "wifi: unknown command '$1' (try: wifi help)" ;;
+  esac
+}
+
 # nvwm: re-run install.sh whenever the repo has changed since the last install
 # (handles a fresh checkout, missing files, or edited sources). The stamp file
 # is refreshed by install.sh, so this only fires on real changes.
