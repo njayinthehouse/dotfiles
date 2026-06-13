@@ -20,7 +20,13 @@ Usage:
                                               background|palette
   sweettalk confide                    rate the current look 0-10 (interactive)
   sweettalk status                     show the current look
+  sweettalk learned                    show what the model has learned you like
   sweettalk startup                    shell-start hook (roll if autoroll, apply)
+
+Stage 2 (the learning layer) is live: once you have LEARN_MIN ratings, rolls use
+a Bayesian linear bandit (ridge + Thompson sampling, pure Python) over features
+of a look, so they generalise toward looks you'll like. Below the threshold rolls
+stay random.
 """
 
 import json
@@ -66,6 +72,12 @@ PROMPTS = [
     ("host",          "%F{green}%m%f %F{blue}%~%f" + G + " › "),
     ("two-line",      "%F{blue}%~%f" + G + "\n%F{green}❯%f "),
     ("two-line-box",  "%F{cyan}╭─%f %F{blue}%~%f" + G + "\n%F{cyan}╰─%f❯ "),
+    # program-running prompts: code runs every render (prompt_subst is on, and the
+    # PROMPT is written single-quoted so $(...) / %(...) reach the shell verbatim).
+    ("clock",         "%F{8}$(date +%H:%M:%S)%f %F{blue}%~%f" + G + " ❯ "),
+    ("status-face",   "%F{blue}%~%f" + G + " %(?.%F{green}^_^.%F{red}x_x)%f "),
+    ("loadavg",       "%F{yellow}$(cut -d\" \" -f1 /proc/loadavg)%f "
+                      "%F{blue}%~%f" + G + " ❯ "),
 ]
 PROMPT_MAP = dict(PROMPTS)
 PROMPT_NAMES = [n for n, _ in PROMPTS]
@@ -132,9 +144,17 @@ def font_values():
 SIZES = [10, 11, 12, 13, 14, 15, 16]
 
 FOREGROUNDS = [
+    # neutral lights
     "#ebdbb2", "#d8dee9", "#abb2bf", "#f8f8f2", "#cdd6f4", "#a9b1d6",
-    "#e0def4", "#ffffff", "#fdf6e3",                 # light
-    "#1d2021", "#282828", "#073642", "#3c3836",      # dark
+    "#e0def4", "#ffffff", "#fdf6e3", "#c0caf5",
+    # warm (reds/oranges/yellows/pinks)
+    "#ffb86c", "#fabd2f", "#f7768e", "#e0af68", "#ff79c6", "#d3869b",
+    "#ffcb6b", "#ee6f57",
+    # cool (greens/cyans/blues/purples)
+    "#8be9fd", "#7dcfff", "#98c379", "#b8bb26", "#50fa7b", "#83a598",
+    "#82aaff", "#bb9af7", "#7aa2f7", "#89ddff",
+    # darks (legible on light backgrounds)
+    "#1d2021", "#282828", "#073642", "#3c3836", "#21222c", "#15161e",
 ]
 BACKGROUNDS = [
     "#1d2021", "#282828", "#2e3440", "#1e1e2e", "#282a36", "#1a1b26",
@@ -309,6 +329,337 @@ def roll_lever(state, name):
     return cur[name]
 
 
+# =============================================================== Stage 2: learn
+# A shallow Bayesian linear bandit over FEATURES of a look. Ratings (0-10) train
+# a ridge-regression posterior; Thompson sampling rolls toward looks the user
+# will like. Pure stdlib — no numpy.
+
+LEARN_MIN = 8               # ratings before learning kicks in; below = random
+RIDGE_LAMBDA = 1.0          # ridge prior strength (A = λI + Σ xxᵀ)
+TS_CANDIDATES = 64          # candidate looks scored per Thompson roll
+
+
+# ----- prompt feature table: (one_line, sym_class, shows_git, shows_time) -----
+# sym_class buckets the trailing prompt symbol; values are stable feature names.
+PROMPT_SYMS = {
+    "minimal": "chevron", "arrow": "chevron", "arrow-status": "chevron",
+    "classic": "hash", "classic-color": "hash", "lambda": "lambda",
+    "bracket": "dollar", "dollar": "dollar", "angle": "guillemet",
+    "chevron": "angle-quote", "star": "star", "dim": "chevron",
+    "time": "chevron", "host": "guillemet", "two-line": "chevron",
+    "two-line-box": "chevron", "clock": "chevron", "status-face": "face",
+    "loadavg": "chevron",
+}
+PROMPT_SYM_CLASSES = ["chevron", "hash", "lambda", "dollar", "guillemet",
+                      "angle-quote", "star", "face"]
+
+
+def _prompt_feats(name):
+    body = PROMPT_MAP.get(name, "")
+    two_line = "\n" in body
+    shows_git = G in body
+    shows_time = ("%T" in body) or ("date " in body) or ("%D" in body)
+    sym = PROMPT_SYMS.get(name, "chevron")
+    feats = [0.0 if two_line else 1.0,      # one_line
+             1.0 if shows_git else 0.0,
+             1.0 if shows_time else 0.0]
+    feats += [1.0 if sym == c else 0.0 for c in PROMPT_SYM_CLASSES]
+    names = ["prompt.one_line", "prompt.shows_git", "prompt.shows_time"]
+    names += [f"prompt.sym.{c}" for c in PROMPT_SYM_CLASSES]
+    return feats, names
+
+
+# ----- font heuristics: family name + a small curated table, with fallbacks ---
+# Ligature-capable families (curated; substring match, lowercased).
+LIGATURE_FONTS = (
+    "firacode", "fira code", "cascadia", "caskaydia", "jetbrains", "victor",
+    "hasklug", "hasklig", "monoid", "lilex", "d2coding", "iosevka", "commit",
+    "geistmono", "geist mono", "monaspice", "recmono", "comicshanns", "intone",
+    "zedmono", "zed mono", "fantasque", "blexmono", "code new roman",
+)
+# Bitmap / pixel fonts (curated).
+BITMAP_FONTS = (
+    "gohufont", "proggy", "terminus", "terminess", "profont", "bigblueterm",
+    "bitstrom", "3270", "shuretech", "envycoder",
+)
+WIDTH_WIDE = ("wide", "expanded", "extended", "extd", "exp")
+WIDTH_NARROW = ("cond", "narrow", "compress")
+STYLE_SLAB = ("slab",)
+STYLE_HAND = ("comic", "fantasque", "opendyslexic", "monofur", "shanns",
+              "casual", "handwrit")
+
+
+def _font_feats(family):
+    low = family.lower()
+    lig = any(s in low for s in LIGATURE_FONTS)
+    bitmap = any(s in low for s in BITMAP_FONTS)
+    wide = any(s in low for s in WIDTH_WIDE)
+    narrow = any(s in low for s in WIDTH_NARROW)
+    slab = any(s in low for s in STYLE_SLAB)
+    hand = any(s in low for s in STYLE_HAND)
+    feats = [1.0 if lig else 0.0,
+             1.0 if bitmap else 0.0,
+             1.0 if wide else 0.0,
+             1.0 if narrow else 0.0,
+             1.0 if slab else 0.0,
+             1.0 if hand else 0.0]
+    names = ["font.ligatures", "font.bitmap", "font.wide", "font.narrow",
+             "font.slab", "font.handwritten"]
+    return feats, names
+
+
+# ----- colour features: luminance + a coarse hue bucket --------------------
+HUE_BUCKETS = ["red", "yellow", "green", "cyan", "blue", "magenta", "gray"]
+
+
+def _hue_bucket(hexs):
+    h = hexs.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    mx, mn = max(r, g, b), min(r, g, b)
+    if mx - mn < 0.10:                       # near-neutral
+        return "gray"
+    if mx == r:
+        deg = ((g - b) / (mx - mn)) % 6
+    elif mx == g:
+        deg = (b - r) / (mx - mn) + 2
+    else:
+        deg = (r - g) / (mx - mn) + 4
+    deg *= 60
+    if deg < 30 or deg >= 330:
+        return "red"
+    if deg < 90:
+        return "yellow"
+    if deg < 150:
+        return "green"
+    if deg < 210:
+        return "cyan"
+    if deg < 270:
+        return "blue"
+    return "magenta"
+
+
+def _color_feats(hexs, prefix):
+    feats = [_lum(hexs)]
+    feats += [1.0 if _hue_bucket(hexs) == b else 0.0 for b in HUE_BUCKETS]
+    names = [f"{prefix}.luminance"]
+    names += [f"{prefix}.hue.{b}" for b in HUE_BUCKETS]
+    return feats, names
+
+
+# ----- the full feature vector ------------------------------------------------
+SIZE_MIN, SIZE_MAX = float(min(SIZES)), float(max(SIZES))
+PALETTE_KEYS = list(PALETTES)
+
+
+def _size_feats(size):
+    sz = float(size)
+    span = (SIZE_MAX - SIZE_MIN) or 1.0
+    norm = (sz - SIZE_MIN) / span
+    feats = [norm,
+             1.0 if sz <= SIZE_MIN + 1 else 0.0,    # tiny
+             1.0 if sz >= SIZE_MAX - 1 else 0.0]     # large
+    names = ["size.norm", "size.tiny", "size.large"]
+    return feats, names
+
+
+def _palette_feats(name):
+    feats = [1.0 if name == k else 0.0 for k in PALETTE_KEYS]
+    names = [f"palette.{k}" for k in PALETTE_KEYS]
+    return feats, names
+
+
+def _build_features(look):
+    """Return (values, names) for a look. Both lists are parallel and stable."""
+    vals, names = [1.0], ["bias"]
+    for getter in (
+        lambda: _prompt_feats(look["prompt"]),
+        lambda: _font_feats(look["font"]),
+        lambda: _size_feats(look["size"]),
+        lambda: _color_feats(look["foreground"], "fg"),
+        lambda: _color_feats(look["background"], "bg"),
+        lambda: _palette_feats(look["palette"]),
+    ):
+        v, n = getter()
+        vals += v
+        names += n
+    return vals, names
+
+
+# FEATURE_NAMES: stable order, computed once from a reference look.
+FEATURE_NAMES = _build_features({
+    "prompt": PROMPT_NAMES[0], "font": "monospace", "size": SIZES[0],
+    "foreground": FOREGROUNDS[0], "background": BACKGROUNDS[0],
+    "palette": PALETTE_KEYS[0]})[1]
+N_FEATURES = len(FEATURE_NAMES)
+
+
+def features(look):
+    """Feature vector for a look, aligned to FEATURE_NAMES."""
+    return _build_features(look)[0]
+
+
+# ----------------------------------------------------- pure-Python linear algebra
+def _dot(a, b):
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _matvec(M, v):
+    return [_dot(row, v) for row in M]
+
+
+def _outer_add(M, v, scale):
+    """In-place M += scale * v vᵀ."""
+    for i, vi in enumerate(v):
+        s = scale * vi
+        if s == 0.0:
+            continue
+        row = M[i]
+        for j, vj in enumerate(v):
+            row[j] += s * vj
+
+
+def _cholesky(A):
+    """Lower-triangular L with L Lᵀ = A (A symmetric positive-definite)."""
+    n = len(A)
+    L = [[0.0] * n for _ in range(n)]
+    for i in range(n):
+        for j in range(i + 1):
+            s = sum(L[i][k] * L[j][k] for k in range(j))
+            if i == j:
+                d = A[i][i] - s
+                L[i][j] = (d ** 0.5) if d > 1e-12 else 1e-6
+            else:
+                L[i][j] = (A[i][j] - s) / L[j][j]
+    return L
+
+
+def _solve_chol(L, b):
+    """Solve (L Lᵀ) x = b given lower-triangular L."""
+    n = len(L)
+    y = [0.0] * n
+    for i in range(n):                       # forward: L y = b
+        y[i] = (b[i] - sum(L[i][k] * y[k] for k in range(i))) / L[i][i]
+    x = [0.0] * n
+    for i in range(n - 1, -1, -1):           # back: Lᵀ x = y
+        x[i] = (y[i] - sum(L[k][i] * x[k] for k in range(i + 1, n))) / L[i][i]
+    return x
+
+
+def _sample_posterior(mean, L, sigma):
+    """Draw w ~ N(mean, σ²A⁻¹), where A = L Lᵀ.
+
+    If z ~ N(0,I) then x solving Lᵀ x = z has cov (L Lᵀ)⁻¹ = A⁻¹, so
+    mean + σ x ~ N(mean, σ²A⁻¹).
+    """
+    n = len(mean)
+    z = [random.gauss(0.0, 1.0) for _ in range(n)]
+    x = [0.0] * n                            # solve Lᵀ x = z (back-substitution)
+    for i in range(n - 1, -1, -1):
+        x[i] = (z[i] - sum(L[k][i] * x[k] for k in range(i + 1, n))) / L[i][i]
+    return [m + sigma * xi for m, xi in zip(mean, x)]
+
+
+def _linalg_selfcheck():
+    """Tiny sanity check: solve a known SPD system; return True on success."""
+    A = [[4.0, 1.0], [1.0, 3.0]]
+    b = [1.0, 2.0]
+    L = _cholesky(A)
+    x = _solve_chol(L, b)
+    # verify A x ≈ b
+    r = _matvec(A, x)
+    return all(abs(a - c) < 1e-9 for a, c in zip(r, b))
+
+
+# ------------------------------------------------------------- the bandit model
+def fit_model(ratings):
+    """Ridge posterior from rated looks.
+
+    A = λI + Σ xxᵀ ;  b = Σ r x ;  mean w = A⁻¹b ;  cov = σ²A⁻¹.
+    Returns dict with mean, the Cholesky L of A, and sigma. Cold-start safe.
+    """
+    n = N_FEATURES
+    A = [[0.0] * n for _ in range(n)]
+    for i in range(n):
+        A[i][i] = RIDGE_LAMBDA
+    bvec = [0.0] * n
+    rs = []
+    for entry in ratings:
+        look = entry.get("look")
+        if not look:
+            continue
+        try:
+            x = features(look)
+        except (KeyError, ValueError):
+            continue
+        r = float(entry.get("rating", 0))
+        rs.append(r)
+        _outer_add(A, x, 1.0)
+        for i, xi in enumerate(x):
+            bvec[i] += r * xi
+    L = _cholesky(A)
+    mean = _solve_chol(L, bvec)
+    # noise scale: spread of ratings, floored so exploration never collapses.
+    if len(rs) >= 2:
+        m = sum(rs) / len(rs)
+        var = sum((v - m) ** 2 for v in rs) / len(rs)
+        sigma = max(var ** 0.5, 1.0)
+    else:
+        sigma = float(SCALE)
+    return {"mean": mean, "L": L, "sigma": sigma, "n": len(rs)}
+
+
+def _score(w, look):
+    return _dot(w, features(look))
+
+
+def thompson_look(model):
+    """Sample a w, generate K contrast-valid candidate looks, pick the best."""
+    w = _sample_posterior(model["mean"], model["L"], model["sigma"])
+    best, best_s = None, None
+    for _ in range(TS_CANDIDATES):
+        cand = random_look()                 # already contrast-filtered
+        s = _score(w, cand)
+        if best_s is None or s > best_s:
+            best, best_s = cand, s
+    return best or random_look()
+
+
+def thompson_lever(model, cur, name):
+    """Vary one lever (others fixed), keeping fg/bg contrast like roll_lever."""
+    w = _sample_posterior(model["mean"], model["L"], model["sigma"])
+    if name == "foreground":
+        opts = _colors_with_contrast(FOREGROUNDS, cur["background"]) or FOREGROUNDS
+    elif name == "background":
+        opts = _colors_with_contrast(BACKGROUNDS, cur["foreground"]) or BACKGROUNDS
+    else:
+        opts = lever_values(name)
+    opts = [v for v in opts if v != cur[name]] or opts
+    best, best_s = None, None
+    for v in opts:
+        trial = dict(cur)
+        trial[name] = v
+        s = _score(w, trial)
+        if best_s is None or s > best_s:
+            best, best_s = v, s
+    return best if best is not None else random.choice(opts)
+
+
+def _learning_on(state):
+    return len(state.get("ratings", [])) >= LEARN_MIN
+
+
+def learned_look(state):
+    """A whole look chosen by the model (caller guarantees learning is on)."""
+    return thompson_look(fit_model(state["ratings"]))
+
+
+def learned_lever(state, name):
+    """Choose one lever via the model; updates state['current'] like roll_lever."""
+    cur = ensure_current(state)
+    cur[name] = thompson_lever(fit_model(state["ratings"]), cur, name)
+    return cur[name]
+
+
 # ------------------------------------------------------------------- commands
 def show_look(look):
     print(f"  prompt     {look['prompt']}")
@@ -368,10 +719,15 @@ def cmd_look(args):
     if sub == "roll":
         state = load_all()
         ensure_current(state)
-        state["current"] = random_look()
+        if _learning_on(state):
+            state["current"] = learned_look(state)
+            note = "sweettalk: new look (learned)\n"
+        else:
+            state["current"] = random_look()
+            note = "sweettalk: new look\n"
         apply_look(state["current"])
         save_all(state)
-        sys.stderr.write("sweettalk: new look\n")
+        sys.stderr.write(note)
         show_look(state["current"])
         return 0
     if sub == "rate":
@@ -405,7 +761,10 @@ def cmd_lever(name, args):
         return 0
     if args[0] == "roll":
         state = load_all()
-        roll_lever(state, name)
+        if _learning_on(state):
+            learned_lever(state, name)
+        else:
+            roll_lever(state, name)
         apply_look(state["current"])
         save_all(state)
         sys.stderr.write(f"sweettalk {name}: {state['current'][name]}\n")
@@ -421,9 +780,64 @@ def cmd_startup():
     state = load_all()
     ensure_current(state)
     if state.get("autoroll", True):
-        state["current"] = random_look()
+        if _learning_on(state):
+            state["current"] = learned_look(state)
+        else:
+            state["current"] = random_look()
     apply_look(state["current"])
     save_all(state)
+    return 0
+
+
+def _humanize(name):
+    """Turn a FEATURE_NAMES key into plain English for the `learned` readout."""
+    pretty = {
+        "prompt.one_line": "one-line prompt", "prompt.shows_git": "git in prompt",
+        "prompt.shows_time": "time in prompt", "font.ligatures": "ligature fonts",
+        "font.bitmap": "bitmap fonts", "font.wide": "wide fonts",
+        "font.narrow": "narrow fonts", "font.slab": "slab fonts",
+        "font.handwritten": "handwritten fonts", "size.norm": "larger size",
+        "size.tiny": "tiny size", "size.large": "large size",
+        "fg.luminance": "bright foreground", "bg.luminance": "bright background",
+    }
+    if name in pretty:
+        return pretty[name]
+    if name.startswith("prompt.sym."):
+        return name.split(".")[-1] + " prompt symbol"
+    if name.startswith("fg.hue."):
+        return name.split(".")[-1] + " foreground"
+    if name.startswith("bg.hue."):
+        return name.split(".")[-1] + " background"
+    if name.startswith("palette."):
+        return name.split(".")[-1] + " palette"
+    return name
+
+
+def cmd_learned():
+    state = load_all()
+    ratings = state.get("ratings", [])
+    n = len(ratings)
+    if n < LEARN_MIN:
+        print(f"learning off — {n}/{LEARN_MIN} ratings "
+              f"(rolls are random until {LEARN_MIN})")
+        return 0
+    model = fit_model(ratings)
+    # skip the bias term; rank the rest by signed weight.
+    pairs = [(FEATURE_NAMES[i], model["mean"][i])
+             for i in range(N_FEATURES) if FEATURE_NAMES[i] != "bias"]
+    pairs.sort(key=lambda p: p[1], reverse=True)
+    likes = [(nm, w) for nm, w in pairs if w > 0.05][:6]
+    dislikes = [(nm, w) for nm, w in pairs if w < -0.05][-6:]
+    dislikes.sort(key=lambda p: p[1])
+    print(f"learned from {n} ratings:")
+    if likes:
+        print("  you like:    " +
+              ", ".join(f"{_humanize(nm)} +{w:.1f}" for nm, w in likes))
+    if dislikes:
+        print("  you dislike: " +
+              ", ".join(f"{_humanize(nm)} {w:.1f}" for nm, w in dislikes))
+    if not likes and not dislikes:
+        print("  no strong preferences yet")
     return 0
 
 
@@ -434,6 +848,8 @@ def main(argv):
         return cmd_confide(argv[2:])
     if len(argv) >= 2 and argv[1] == "status":
         return cmd_status()
+    if len(argv) >= 2 and argv[1] == "learned":
+        return cmd_learned()
     if len(argv) >= 2 and argv[1] == "look":
         return cmd_look(argv[2:])
     if len(argv) >= 2 and argv[1] in LEVERS:

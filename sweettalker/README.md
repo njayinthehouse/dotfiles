@@ -39,6 +39,16 @@ sh install.sh        # binary + .zshrc source line (self-installs on repo change
 | `<lever> help` | usage |
 | `confide` | rate the current look 0–10 (interactive, skippable) |
 | `look rate <0-10>` | rate non-interactively |
+| `learned` | show what the model has learned you like/dislike |
+
+### Live (program-running) prompts
+
+A few prompts run code on **every** render (`prompt_subst` is on and the PROMPT
+is written single-quoted, so `$(...)` / `%(...)` reach the shell verbatim):
+
+- `clock` — a live `$(date +%H:%M:%S)` that ticks each prompt draw
+- `status-face` — a `%(?.…)` happy/sad face for the last command's exit status
+- `loadavg` — 1-minute load from `$(cut -d" " -f1 /proc/loadavg)`
 
 ## How it works
 
@@ -54,10 +64,14 @@ sh install.sh        # binary + .zshrc source line (self-installs on repo change
 
 - **Stage 1 (done):** the six levers, live apply + persist, whole/per-lever
   random rolls, `confide` 0–10 collecting ratings.
-- **Stage 2:** a Bayesian linear bandit (Thompson sampling, pure Python) that
-  turns each rating into per-feature weights — so it learns *what* you like
-  (e.g. ligatures, two-line prompts, dark backgrounds), generalises to looks it
-  hasn't shown you, and rolls toward promising ones. Plus a `learned` readout.
+- **Stage 2 (done):** a Bayesian linear bandit (ridge + Thompson sampling, pure
+  Python — no numpy) over ~40 *features* of a look (prompt shape/symbol/git/time,
+  font ligatures/bitmap/width/style, size, fg/bg luminance + hue bucket, palette).
+  Each 0–10 rating updates a posterior over per-feature weights, so it learns
+  *what* you like (e.g. ligatures, two-line prompts, dark backgrounds),
+  generalises to looks it hasn't shown you, and rolls toward promising ones via
+  Thompson sampling. Below `LEARN_MIN` (8) ratings, rolls stay exactly random.
+  The `learned` command prints the top +/- weights in plain English.
 
 ## Extending
 
