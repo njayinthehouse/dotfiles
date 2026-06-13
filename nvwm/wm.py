@@ -537,6 +537,16 @@ class XTalker:
         except BadWindow:
             return False
 
+    def button_pressed(self) -> bool:
+        """True if any pointer button is held — i.e. a drag is in progress.
+        Used to suppress focus-follows-mouse so we don't abort an app's own
+        drag (notably Firefox tab tear-off/merge between windows)."""
+        try:
+            return bool(self.root.query_pointer().mask
+                        & (X.Button1Mask | X.Button2Mask | X.Button3Mask))
+        except Exception:
+            return False
+
     @property
     def focused(self) -> int | None:
         return self._focused
@@ -748,6 +758,10 @@ class WindowManager:
         self.x.focus(client.id)
 
     async def on_entered(self, client: XWindow) -> None:
+        # Don't steal focus / restack while a button is held: focus-follows-
+        # mouse firing mid-drag aborts app drags like Firefox tab tear-off.
+        if self.x.button_pressed():
+            return
         self.x.focus(client.id)
         if client.id != self.nvim_host_id:
             self.x.set_stacking(client.id, X.Above)

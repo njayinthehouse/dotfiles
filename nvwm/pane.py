@@ -44,22 +44,24 @@ async def resolve(vt: VimTalker, id: str) -> Handle | None:
     return None
 
 
-async def auto_name(vt: VimTalker) -> str:
-    """Generate the next pane name: p1, p2, p3, ..."""
-    counter = await vt.var("pane_counter")
-    n = (counter or 0) + 1
-    await vt.set_var("pane_counter", n)
-    return f"p{n}"
-
-
 async def cmd_new(vt: VimTalker, args: list[str]) -> None:
     pane = await vt.create_split()
     if pane is None:
         print("pane new: failed to create split", file=sys.stderr)
         return
-    id = args[0] if args else await auto_name(vt)
-    await vt.set_win_var(pane.win, "pane_id", id)
-    print(id)
+    if args:
+        await vt.set_win_var(pane.win, "pane_id", args[0])
+        print(args[0])
+        return
+    # No id given: nvwm.lua's WinNew autocmd assigns a memorable name on a
+    # scheduled tick. Poll briefly so we can echo whatever it chose.
+    for _ in range(40):                       # ~400ms budget
+        pid = await vt.win_var(pane.win, "pane_id")
+        if pid:
+            print(pid)
+            return
+        await asyncio.sleep(0.01)
+    print(str(pane.win))
 
 
 async def cmd_ls(vt: VimTalker, args: list[str]) -> None:
@@ -147,6 +149,7 @@ async def cmd_swap(vt: VimTalker, args: list[str]) -> None:
         print("usage: pane swap <id1> {<id2>}", file=sys.stderr)
         return
 
+    caller = await vt.current_win()           # focus rides along with this pane
     w1 = await resolve(vt, args[0])
     if w1 is None:
         print(f"pane swap: not found: {args[0]}", file=sys.stderr)
@@ -173,6 +176,16 @@ async def cmd_swap(vt: VimTalker, args: list[str]) -> None:
         return
     await vt.command(f"call win_execute({int(w1)}, 'buffer {b2}')")
     await vt.command(f"call win_execute({int(w2)}, 'buffer {b1}')")
+
+    # focus follows the caller's buffer to its new window
+    if caller is not None:
+        target = w2 if int(caller) == int(w1) else (
+            w1 if int(caller) == int(w2) else None)
+        if target is not None:
+            await vt.set_current_win(target)
+            info = await vt.win_buf_info(target)
+            if info and info[1] == "terminal":
+                await vt.startinsert()
 
     # swap pane IDs
     pid1 = await vt.win_var(w1, "pane_id")

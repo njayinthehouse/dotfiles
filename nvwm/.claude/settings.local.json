@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p ~/sweettalker)",
+      "Read(//home/egret/**)",
+      "Bash(chmod +x /home/egret/sweettalker/clean.sh /home/egret/nvwm/clean.sh)"
+    ]
+  }
+}
