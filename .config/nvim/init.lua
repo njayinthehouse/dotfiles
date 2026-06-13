@@ -1,6 +1,18 @@
 vim.g.loaded_netrw = 1
 vim.g.loaded_netrwPlugin = 1
 
+-- Status bar shows the pane's memorable name (w:pane_id, set by nvwm.lua)
+-- instead of the raw buffer name like "term://~//...". %{} is evaluated in
+-- the context of each window, so every pane shows its own id.
+-- laststatus=2 keeps a status line on every window (one per pane).
+vim.o.laststatus = 2
+vim.o.statusline = table.concat({
+  " %{get(w:,'pane_id','[unnamed]')} ",      -- pane name, leading
+  "%(· %{&buftype=='terminal' ? b:term_title : expand('%:t')} %)",  -- term/file
+  "%=",                                       -- right-align the rest
+  "%l:%c ",                                   -- line:col
+})
+
 -- nvim <dir> opens a terminal at that <dir>
 vim.api.nvim_create_autocmd("VimEnter", {
   callback = function()
