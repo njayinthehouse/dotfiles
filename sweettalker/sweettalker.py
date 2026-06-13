@@ -27,7 +27,8 @@ Usage:
   sweettalk confide                    rate the current look 0-10 (interactive)
   sweettalk status                     show the current look
   sweettalk learned                    show what the model has learned you like
-  sweettalk startup                    shell-start hook (roll if autoroll, apply)
+  sweettalk session                    startx-session hook (roll if autoroll, apply)
+  sweettalk startup                    shell-start hook (apply current look)
 
 Stage 2 (the learning layer) is live: once you have LEARN_MIN ratings, rolls use
 a Bayesian linear bandit (ridge + Thompson sampling, pure Python) over features
@@ -828,7 +829,10 @@ def cmd_lever(name, args):
     return 2
 
 
-def cmd_startup():
+def cmd_session():
+    """startx-session hook: roll a fresh look once per session if autoroll is on,
+    then apply. Called from ~/.xinitrc. Every shell in the session then just
+    applies this look via `startup`, so the whole session shares one look."""
     state = load_all()
     ensure_current(state)
     if state.get("autoroll", True):
@@ -836,6 +840,17 @@ def cmd_startup():
             state["current"] = learned_look(state)
         else:
             state["current"] = random_look()
+    apply_look(state["current"])
+    save_all(state)
+    return 0
+
+
+def cmd_startup():
+    """shell-start hook: apply the session's current look, never roll. The roll
+    is the session's job (`session`, from ~/.xinitrc), so opening a new pane or
+    shell doesn't change the look out from under you."""
+    state = load_all()
+    ensure_current(state)
     apply_look(state["current"])
     save_all(state)
     return 0
@@ -894,6 +909,8 @@ def cmd_learned():
 
 
 def main(argv):
+    if len(argv) >= 2 and argv[1] == "session":
+        return cmd_session()
     if len(argv) >= 2 and argv[1] == "startup":
         return cmd_startup()
     if len(argv) >= 2 and argv[1] == "confide":

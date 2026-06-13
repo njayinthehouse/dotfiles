@@ -1,7 +1,9 @@
 # sweettalker — terminal "look" selector. Source from ~/.zshrc.
 #
-# On shell start one engine call applies (and, if autoroll is on, first rolls)
-# the current look; then the resulting prompt is loaded. The look / prompt /
+# On shell start one engine call applies the session's current look; then the
+# resulting prompt is loaded. Rolling a fresh look is the startx session's job
+# (`sweettalk session`, from ~/.xinitrc, when autoroll is on), so opening a new
+# pane never changes the look out from under you. The look / prompt /
 # font / size / foreground / background / palette / confide commands are
 # defined as aliases in ~/.zshrc.
 
