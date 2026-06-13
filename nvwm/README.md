@@ -58,6 +58,21 @@ pane kill {<id>}         close a pane
 pane goto {<id>}         jump to a pane (or the last visited)
 ```
 
+## Known issues
+
+- **Firefox tab drag-to-other-window doesn't move the tab.** Dragging a tab
+  onto another Firefox window's tab strip fails to merge it. Two fixes already
+  in `wm.py` did *not* solve it: (1) a synthetic `ConfigureNotify` carrying root
+  coordinates in `_notify_configure`, so reparented clients know their on-root
+  position for hit-testing; (2) `button_pressed()` suppressing focus-follows-
+  mouse mid-drag in `on_entered`. Both Firefox client windows do have
+  `XdndAware` set. Next step: inspect the reparented tree (`xwininfo -root
+  -tree`) and check whether XDND target-finding descends into the frame or needs
+  an `XdndProxy` on the frame pointing at the client; also whether the absence
+  of root EWMH (`_NET_CLIENT_LIST`) matters.
+- `pane_to_pixels` alignment — the GUI slightly covers the status bar (needs a
+  terminal padding offset).
+
 ## Requirements
 
 `python-xlib`, `python-msgpack` (Python 3.11+ for `asyncio.TaskGroup`).
