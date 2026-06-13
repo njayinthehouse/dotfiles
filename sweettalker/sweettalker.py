@@ -5,9 +5,15 @@ A *look* is one value per lever:
   prompt      the zsh prompt (curated pool)
   font        the Alacritty font family (auto-discovered monospace)
   size        the font size
-  foreground  the text colour      (Alacritty colors.primary.foreground)
-  background  the window colour     (Alacritty colors.primary.background)
-  palette     the 16 ANSI colours   (Alacritty colors.normal/bright.*)
+  foreground  the text colour      (Alacritty fg + neovim Normal guifg)
+  background  the window colour     (Alacritty bg + neovim Normal guibg)
+  palette     the 16 ANSI colours   (Alacritty + neovim g:terminal_color_0..15)
+
+The session lives inside neovim (nvwm runs `alacritty -e nvim`, panes are nvim
+:terminal buffers), so neovim paints over every cell — Alacritty colour overrides
+only show in the uncovered strip. The colour levers therefore ALSO drive neovim
+over its RPC ($NVIM): Normal/Visual/Search highlights + the :terminal palette.
+Font and size stay with Alacritty (it owns the font).
 
 You roll a whole look (or tweak one lever) and rate the whole thing 0-10. In
 Stage 1 rolls are random (contrast-filtered so looks stay readable) and ratings
@@ -257,6 +263,51 @@ def ipc_args(look):
     return args
 
 
+# ---------------------------------------------------------------- neovim apply
+# The user lives inside neovim (nvwm launches `alacritty -e nvim`, and panes are
+# nvim :terminal buffers), so neovim paints its own colorscheme over every cell —
+# Alacritty colour overrides only show in the thin uncovered strip. To make the
+# COLOUR levers visible we also drive neovim over its RPC: sweettalk runs inside a
+# nvim :terminal, so $NVIM points at the nvim socket and `nvim --server` reaches
+# it. Font/size stay with Alacritty (it owns the font); only colours go to nvim.
+def _hl_accent(look):
+    """A readable highlight (Visual) bg: the palette colour with best contrast
+    against the foreground, so selected text stays legible."""
+    pal = PALETTES[look["palette"]]
+    cands = pal["normal"] + pal["bright"]
+    return max(cands, key=lambda c: contrast(c, look["foreground"]))
+
+
+def nvim_cmds(look):
+    """Build ONE bar-joined vimscript string mapping the colour levers onto
+    neovim highlights + the :terminal ANSI palette. Pure: no I/O. Assumes
+    termguicolors (gui* attrs)."""
+    pal = PALETTES[look["palette"]]
+    fg, bg = look["foreground"], look["background"]
+    hl = _hl_accent(look)
+    parts = [f"hi Normal guifg={fg} guibg={bg}",
+             f"hi Visual guibg={hl}",
+             f"hi Search guibg={hl} guifg={fg}"]
+    colors16 = pal["normal"] + pal["bright"]      # terminal_color_0..15
+    parts += [f"let g:terminal_color_{i}='{c}'"
+              for i, c in enumerate(colors16)]
+    return " | ".join(parts)
+
+
+def nvim_apply(look):
+    """Apply the colour levers to the live neovim over its RPC (best-effort).
+    No-op unless $NVIM is set and IPC isn't suppressed."""
+    server = os.environ.get("NVIM")
+    if not server or os.environ.get("SWEETTALKER_NO_IPC"):
+        return
+    expr = "execute('" + nvim_cmds(look).replace("'", "''") + "')"
+    try:
+        subprocess.run(["nvim", "--server", server, "--remote-expr", expr],
+                       check=False, capture_output=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def apply_look(look):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     PROMPT_CURRENT.write_text("PROMPT=" + _squote(PROMPT_MAP[look["prompt"]]) + "\n")
@@ -269,6 +320,7 @@ def apply_look(look):
                        check=False, capture_output=True, timeout=3)
     except (OSError, subprocess.SubprocessError):
         pass
+    nvim_apply(look)
 
 
 # --------------------------------------------------------------------- state

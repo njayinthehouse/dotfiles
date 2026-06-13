@@ -9,13 +9,37 @@ A *look* is one value per lever:
 | `prompt` | the zsh prompt | `current.zsh` (PROMPT) |
 | `font` | Alacritty font family | IPC + `sweettalker.toml` |
 | `size` | font size | IPC + `sweettalker.toml` |
-| `foreground` | text colour | IPC + `sweettalker.toml` |
-| `background` | window colour | IPC + `sweettalker.toml` |
-| `palette` | the 16 ANSI colours | IPC + `sweettalker.toml` |
+| `foreground` | text colour | Alacritty IPC + neovim `Normal` guifg |
+| `background` | window colour | Alacritty IPC + neovim `Normal` guibg |
+| `palette` | the 16 ANSI colours | Alacritty IPC + neovim `g:terminal_color_0..15` |
 
 You roll a whole look (or tweak one lever) and rate the whole thing **0–10**.
-Everything applies **live** to the running Alacritty over its IPC socket, and is
+Font/size apply **live** to the running Alacritty over its IPC socket and are
 persisted to an imported config file so a freshly-launched Alacritty matches.
+
+### Colours go to neovim, not just Alacritty
+
+The session lives **inside neovim** (nvwm launches `alacritty -e nvim`, and panes
+are neovim `:terminal` buffers). neovim paints its own colorscheme over every
+cell, so Alacritty colour overrides are invisible except in the thin strip below
+neovim. So the colour levers also drive **neovim** — what you actually see —
+over its RPC (`$NVIM`, set because sweettalk runs in a neovim `:terminal`):
+
+- `foreground` → neovim `Normal` guifg
+- `background` → neovim `Normal` guibg
+- `highlight`/accent → `Visual` and `Search` guibg (the palette colour with the
+  best contrast against the foreground, so selections stay readable)
+- `palette` → `g:terminal_color_0..15` (normal[0..7] then bright[0..7]) so
+  `:terminal` ANSI colours match
+
+It's applied via `nvim --server "$NVIM" --remote-expr "execute('…')"` (no editor
+mode change). The Alacritty colour IPC is still sent too, for the uncovered strip
+and fresh-launch consistency.
+
+> **Caveat:** if you later `:colorscheme …` (or a plugin re-applies one) inside
+> neovim, it overrides these `Normal`/`Visual`/`terminal_color` settings — roll
+> again to re-apply. sweettalk drives the highlights directly rather than owning
+> a colorscheme.
 
 ## Install
 
@@ -56,7 +80,9 @@ is written single-quoted, so `$(...)` / `%(...)` reach the shell verbatim):
   flag, and the list of `{look, rating}` you've confided.
 - The prompt is written to `current.zsh` (sourced by `sweettalker.zsh`); the
   Alacritty levers are written to `sweettalker.toml` (imported by
-  `alacritty.toml`) **and** pushed live via `alacritty msg config`.
+  `alacritty.toml`) **and** pushed live via `alacritty msg config`. The colour
+  levers are additionally pushed to the live neovim via `nvim --server --remote-expr`
+  (best-effort; only when `$NVIM` is set and `SWEETTALKER_NO_IPC` is not).
 - Colours stay legible: candidate looks are contrast-filtered so the foreground
   is never too close to the background.
 
