@@ -3,6 +3,7 @@
 pane — manage neovim panes from the shell.
 
     pane new {<id>}             create a new pane, auto-named if no id given
+    pane rename {<id>} <name>   rename the current pane {or id} to name
     pane ls {<regex>}           list panes, optionally filtered
     pane swap <id1> {<id2>}     swap pane id1 with current {or id2}, incl. GUI
     pane kill {<id>}            kill current pane {or the named one}
@@ -115,6 +116,32 @@ async def cmd_goto(vt: VimTalker, args: list[str]) -> None:
         await vt.startinsert()
 
 
+async def cmd_rename(vt: VimTalker, args: list[str]) -> None:
+    if not args:
+        print("usage: pane rename {<id>} <name>", file=sys.stderr)
+        return
+    # one arg -> rename current pane; two -> rename the named one
+    if len(args) >= 2:
+        w = await resolve(vt, args[0])
+        newname = args[1]
+        if w is None:
+            print(f"pane rename: not found: {args[0]}", file=sys.stderr)
+            return
+    else:
+        w = await vt.current_win()
+        newname = args[0]
+    if w is None:
+        return
+    # refuse a name already taken by a different pane (resolve picks the first
+    # match, so duplicates would shadow each other)
+    existing = await resolve(vt, newname)
+    if existing is not None and int(existing) != int(w):
+        print(f"pane rename: name already in use: {newname}", file=sys.stderr)
+        return
+    await vt.set_win_var(w, "pane_id", newname)
+    print(newname)
+
+
 async def cmd_swap(vt: VimTalker, args: list[str]) -> None:
     if not args:
         print("usage: pane swap <id1> {<id2>}", file=sys.stderr)
@@ -166,17 +193,19 @@ async def cmd_swap(vt: VimTalker, args: list[str]) -> None:
 
 
 COMMANDS = {
-    "new":  cmd_new,
-    "ls":   cmd_ls,
-    "kill": cmd_kill,
-    "goto": cmd_goto,
-    "swap": cmd_swap,
+    "new":    cmd_new,
+    "rename": cmd_rename,
+    "ls":     cmd_ls,
+    "kill":   cmd_kill,
+    "goto":   cmd_goto,
+    "swap":   cmd_swap,
 }
 
 
 async def amain() -> None:
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
-        print("usage: pane {new|ls|swap|kill|goto} [args...]", file=sys.stderr)
+        print("usage: pane {new|rename|ls|swap|kill|goto} [args...]",
+              file=sys.stderr)
         sys.exit(1)
     sock = os.environ.get("NVIM")
     if not sock:
