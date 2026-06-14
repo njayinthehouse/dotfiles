@@ -1,8 +1,18 @@
 NVWM_REPO="$HOME/nvwm"
 SWEETTALKER_REPO="$HOME/sweettalker"
 ST_REPO="$HOME/st"
+LLVM_REPO="$HOME/llvm-project"
 
 export PATH="$HOME/.local/bin:$PATH"
+
+# from-source LLVM/clang toolchain (our default compiler; gcc dropped). The
+# runtime libs (libc++/libunwind) install to a per-target subdir, so the loader
+# needs it on its path for clang-built C++ binaries to run.
+export PATH="$HOME/.local/llvm/bin:$PATH"
+export LD_LIBRARY_PATH="$HOME/.local/llvm/lib/x86_64-unknown-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# Lean toolchain (elan)
+export PATH="$HOME/.elan/bin:$PATH"
 
 # Common aliases
 alias l='ls'
