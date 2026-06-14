@@ -48,13 +48,81 @@ wifi() {
         fi
       fi ;;
     list|ls)        nmcli device wifi list ;;
-    connect|c)      shift; nmcli --ask device wifi connect "$@" ;;
+    connect|c)
+      shift
+      local always=0 cargs=() a
+      for a in "$@"; do [[ $a == --always ]] && always=1 || cargs+=("$a"); done
+      nmcli --ask device wifi connect "${cargs[@]}"
+      if (( always )); then               # prefer + auto-connect this SSID
+        nmcli connection modify "${cargs[1]}" connection.autoconnect yes \
+              connection.autoconnect-priority 100 2>/dev/null \
+          && echo "wifi: ${cargs[1]} set to always auto-connect when available"
+      fi ;;
     disconnect|d)   nmcli device disconnect "$dev" ;;
     on)             nmcli radio wifi on ;;
     off)            nmcli radio wifi off ;;
-    help|-h|--help) print "usage: wifi [status | list | connect <ssid> | disconnect | on | off | help]" ;;
+    help|-h|--help) print "usage: wifi [status | list | connect <ssid> [--always] | disconnect | on | off | help]" ;;
     *) print -u2 "wifi: unknown command '$1' (try: wifi help)" ;;
   esac
+}
+
+# bluetooth — status / list / scan / connect / disconnect / on / off (bluez).
+# Mirrors `wifi`; drives bluetoothctl + rfkill. connect/disconnect/pair take a
+# MAC, or a case-insensitive name substring resolved from the known devices.
+bt() {
+  local mac
+  case "$1" in
+    ""|status)
+      if rfkill list bluetooth 2>/dev/null | grep -q 'Soft blocked: yes'; then
+        echo "bluetooth: off (rfkill blocked)"
+      elif bluetoothctl show 2>/dev/null | grep -q 'Powered: yes'; then
+        echo "bluetooth: on"
+        local con
+        con=$(bluetoothctl devices Connected 2>/dev/null \
+              | sed 's/^Device [0-9A-F:]* /  connected: /')
+        [[ -n $con ]] && echo "$con" || echo "  (nothing connected)"
+      else
+        echo "bluetooth: powered off"
+      fi ;;
+    list|ls)   bluetoothctl devices ;;
+    paired)    bluetoothctl devices Paired ;;
+    scan)      echo "scanning ${2:-10}s…"
+               bluetoothctl --timeout "${2:-10}" scan on >/dev/null 2>&1
+               bluetoothctl devices ;;
+    connect|c)
+      shift
+      local always=0 cargs=() a
+      for a in "$@"; do [[ $a == --always ]] && always=1 || cargs+=("$a"); done
+      mac=$(_bt_resolve "${cargs[@]}") || { print -u2 "bt: no device matching '${cargs[*]}'"; return 1; }
+      bluetoothctl connect "$mac"
+      (( always )) && bluetoothctl trust "$mac" >/dev/null \
+        && echo "bt: trusted $mac — will auto-reconnect when available" ;;
+    disconnect|d)
+      shift
+      if [[ -n $1 ]]; then
+        mac=$(_bt_resolve "$@") || { print -u2 "bt: no device matching '$*'"; return 1; }
+        bluetoothctl disconnect "$mac"
+      else
+        bluetoothctl disconnect            # no arg → drop all connections
+      fi ;;
+    pair|p)
+      shift
+      mac=$(_bt_resolve "$@") || { print -u2 "bt: no device matching '$*'"; return 1; }
+      bluetoothctl pair "$mac" ;;
+    on)        rfkill unblock bluetooth 2>/dev/null; bluetoothctl power on ;;
+    off)       bluetoothctl power off ;;
+    help|-h|--help) print "usage: bt [status | list | paired | scan [secs] | connect <name|mac> [--always] | disconnect [name|mac] | pair <name|mac> | on | off]" ;;
+    *) print -u2 "bt: unknown command '$1' (try: bt help)" ;;
+  esac
+}
+
+# resolve a MAC directly, or the first known device whose name matches the args
+_bt_resolve() {
+  if [[ $1 == [0-9A-Fa-f][0-9A-Fa-f]:* ]]; then
+    print -r -- "$1"
+  else
+    bluetoothctl devices 2>/dev/null | grep -i -- "$*" | head -1 | awk '{print $2}' | grep .
+  fi
 }
 
 # nvwm: re-run install.sh whenever the repo has changed since the last install
