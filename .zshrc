@@ -1,5 +1,6 @@
 NVWM_REPO="$HOME/nvwm"
 SWEETTALKER_REPO="$HOME/sweettalker"
+ST_REPO="$HOME/st"
 
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -148,6 +149,17 @@ if [[ -d $SWEETTALKER_REPO ]]; then
   unset _st_stamp
 fi
 [[ -f $SWEETTALKER_REPO/sweettalker.zsh ]] && source $SWEETTALKER_REPO/sweettalker.zsh
+
+# st: rebuild + reinstall when the repo changes (same stamp pattern as nvwm).
+# Guarded on `make` so it stays quiet until the build toolchain is installed.
+if [[ -d $ST_REPO ]] && command -v make >/dev/null; then
+  _stbin_stamp=~/.local/bin/.st-installed
+  if [[ ! -e $_stbin_stamp ]] || \
+     [[ -n $(find $ST_REPO -type f -newer $_stbin_stamp -print -quit 2>/dev/null) ]]; then
+    sh $ST_REPO/install.sh >/dev/null && echo "st: rebuilt + installed"
+  fi
+  unset _stbin_stamp
+fi
 
 # ── zsh enhancements: the useful parts of oh-my-zsh, no framework ───────────
 # Install: sudo pacman -S --needed zsh-autosuggestions zsh-syntax-highlighting \

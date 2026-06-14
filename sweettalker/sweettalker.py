@@ -24,7 +24,7 @@ Usage:
   sweettalk look [roll|auto [on|off]|rate <0-10>|help]     # the whole look
   sweettalk <lever> [roll|help]        lever = prompt|font|size|foreground|
                                               background|palette
-  sweettalk confide                    rate the current look 0-10 (interactive)
+  sweettalk confide                    rate the look 0-10 + thumb each part (interactive)
   sweettalk status                     show the current look
   sweettalk learned                    show what the model has learned you like
   sweettalk session                    startx-session hook (roll if autoroll, apply)
@@ -624,11 +624,41 @@ def _linalg_selfcheck():
 
 
 # ------------------------------------------------------------- the bandit model
+# Maps a lever to the prefix its features carry in FEATURE_NAMES, so a
+# per-component thumb can be turned into an observation that touches only that
+# lever's weights (see _masked_features / fit_model).
+LEVER_PREFIX = {
+    "prompt": "prompt.", "font": "font.", "size": "size.",
+    "foreground": "fg.", "background": "bg.", "palette": "palette.",
+}
+
+
+def _masked_features(x, lever):
+    """A feature vector that is `x` only inside `lever`'s own feature group and
+    zero everywhere else (bias included). Used so a component thumbs-up/down
+    trains just that lever's weights, leaving the rest of the look uncredited."""
+    prefix = LEVER_PREFIX[lever]
+    return [v if FEATURE_NAMES[i].startswith(prefix) else 0.0
+            for i, v in enumerate(x)]
+
+
+def _add_obs(A, b, x, r):
+    """Fold one (feature-vector, target) observation into the ridge normal eqns:
+    A += x xᵀ ;  b += r x."""
+    _outer_add(A, x, 1.0)
+    for i, xi in enumerate(x):
+        b[i] += r * xi
+
+
 def fit_model(ratings):
     """Ridge posterior from rated looks.
 
     A = λI + Σ xxᵀ ;  b = Σ r x ;  mean w = A⁻¹b ;  cov = σ²A⁻¹.
-    Returns dict with mean, the Cholesky L of A, and sigma. Cold-start safe.
+    Each entry contributes a whole-look observation (when it carries a 0-SCALE
+    rating) and/or one masked single-lever observation per component thumb
+    (yes → SCALE, no → 0) that trains only that lever's features. Only the real
+    whole-look ratings drive sigma. Returns dict with mean, the Cholesky L of A,
+    and sigma. Cold-start safe.
     """
     n = N_FEATURES
     A = [[0.0] * n for _ in range(n)]
@@ -644,14 +674,18 @@ def fit_model(ratings):
             x = features(look)
         except (KeyError, ValueError):
             continue
-        r = float(entry.get("rating", 0))
-        rs.append(r)
-        _outer_add(A, x, 1.0)
-        for i, xi in enumerate(x):
-            bvec[i] += r * xi
+        rating = entry.get("rating")
+        if rating is not None:
+            r = float(rating)
+            rs.append(r)
+            _add_obs(A, bvec, x, r)
+        for lever, keep in (entry.get("components") or {}).items():
+            if lever in LEVER_PREFIX:
+                _add_obs(A, bvec, _masked_features(x, lever),
+                         float(SCALE) if keep else 0.0)
     L = _cholesky(A)
     mean = _solve_chol(L, bvec)
-    # noise scale: spread of ratings, floored so exploration never collapses.
+    # noise scale: spread of real ratings, floored so exploration never collapses.
     if len(rs) >= 2:
         m = sum(rs) / len(rs)
         var = sum((v - m) ** 2 for v in rs) / len(rs)
@@ -746,6 +780,20 @@ def _ask_rating(label):
     return None
 
 
+def _ask_yesno(label):
+    """Optional thumb for one component: True (y), False (n), or None (skip)."""
+    try:
+        raw = input(f"    {label}  keep? (y/n, Enter skips) > ").strip().lower()
+    except EOFError:
+        print()
+        return None
+    if raw in ("y", "yes"):
+        return True
+    if raw in ("n", "no"):
+        return False
+    return None
+
+
 def _record_rating(state, value):
     cur = state["current"]
     state.setdefault("ratings", []).append({"look": dict(cur), "rating": value})
@@ -753,15 +801,41 @@ def _record_rating(state, value):
     print(f"    ✓ {value}/{SCALE}  ({len(state['ratings'])} ratings so far)")
 
 
+def _record_confide(state, rating, components):
+    """Append one confide entry carrying an optional whole-look rating and/or
+    optional per-component thumbs, then report what landed."""
+    entry = {"look": dict(state["current"])}
+    if rating is not None:
+        entry["rating"] = rating
+    if components:
+        entry["components"] = components
+    state.setdefault("ratings", []).append(entry)
+    save_all(state)
+    bits = []
+    if rating is not None:
+        bits.append(f"{rating}/{SCALE}")
+    if components:
+        bits.append(" ".join(f"{k}{'+' if v else '-'}"
+                             for k, v in components.items()))
+    print(f"    ✓ recorded {'; '.join(bits)}  ({len(state['ratings'])} entries)")
+
+
 def cmd_confide(args):
     state = load_all()
     cur = ensure_current(state)
-    print("confide — rate this whole look (Enter to skip)\n")
+    print("confide — rate the whole look, then thumb each part (Enter skips any)\n")
     show_look(cur)
     print()
-    v = _ask_rating("this look")
-    if v is not None:
-        _record_rating(state, v)
+    rating = _ask_rating("this whole look")
+    components = {}
+    for lever in LEVERS:
+        verdict = _ask_yesno(f"{lever:<11}({cur[lever]})")
+        if verdict is not None:
+            components[lever] = verdict
+    if rating is None and not components:
+        print("    nothing recorded")
+        return 0
+    _record_confide(state, rating, components)
     return 0
 
 

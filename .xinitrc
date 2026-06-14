@@ -3,7 +3,8 @@
 # then just apply it via `sweettalk startup`, so the whole session shares one look.
 "$HOME/.local/bin/sweettalk" session >/dev/null 2>&1
 
+mkdir -p "$HOME/.logs"        # nvwm's stderr redirect below needs this to exist
 rm -f /tmp/nvim.sock
-"$HOME/.local/bin/nvwm" 2>"$HOME/nvwm.log" &
+"$HOME/.local/bin/nvwm" 2>"$HOME/.logs/nvwm.log" &
 sleep 0.4
-exec alacritty --class nvwm_nvim -e nvim --listen /tmp/nvim.sock +terminal +startinsert
+exec "$HOME/.local/bin/st" -c nvwm_nvim -e nvim --listen /tmp/nvim.sock +terminal +startinsert
