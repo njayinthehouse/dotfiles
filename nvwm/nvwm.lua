@@ -28,7 +28,11 @@ vim.api.nvim_create_autocmd(
   --   WinNew      — new split created
   --   WinClosed   — split removed (remaining panes grow)
   --   VimResized  — host terminal itself resized
-  { "WinResized", "WinNew", "WinClosed", "VimResized" },
+  --   TabEnter / TabNewEntered / TabClosed — switched sesh session: the WM
+  --                 hides GUI clients on background tabpages and re-shows the
+  --                 active tab's (see WindowManager.resync tab-scoped pass)
+  { "WinResized", "WinNew", "WinClosed", "VimResized",
+    "TabEnter", "TabNewEntered", "TabClosed" },
   { group = grp, callback = _G.nvwm_notify }
 )
 

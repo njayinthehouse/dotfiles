@@ -340,6 +340,15 @@ class VimTalker:
     async def current_win(self) -> Handle | None:
         return await self._req("nvim_get_current_win")
 
+    async def current_tabpage(self) -> Handle | None:
+        return await self._req("nvim_get_current_tabpage")
+
+    async def tabpage_wins(self, tab: Handle) -> list[Handle]:
+        """Windows on a tabpage. Used to scope GUI visibility to the active
+        sesh session: clients on background tabpages are hidden."""
+        res = await self._req("nvim_tabpage_list_wins", tab)
+        return res if res is not None else []
+
     async def set_current_win(self, handle: Handle) -> None:
         await self._req("nvim_set_current_win", handle)
 
@@ -846,7 +855,15 @@ class WindowManager:
             # every normal GUI gets its own pane; dialogs/utilities overlay
             # the focused pane without splitting.
             if is_normal:
-                pane = await self.vim.create_split()
+                # `sesh` builds the target window tree up front, then launches
+                # each GUI leaf with g:nvwm_adopt_pending set so we bind the
+                # client to its prepared (current) window instead of splitting
+                # off a new one — same pending-var protocol as swap/full/min.
+                if await self.vim.var("nvwm_adopt_pending"):
+                    await self.vim.set_var("nvwm_adopt_pending", 0)
+                    pane = await self.vim.focused_pane()
+                else:
+                    pane = await self.vim.create_split()
             else:
                 pane = await self.vim.focused_pane()
             rect = await self.pane_to_pixels(pane) if pane else None
@@ -1123,9 +1140,19 @@ class WindowManager:
         fs = self.fullscreen
         if fs is not None and not self.x.is_managed(fs):
             fs = self.fullscreen = None
+        # tab-scoped visibility: each sesh session is a tabpage, and neovim only
+        # renders the current tab's windows. Clients tiled into a background
+        # tab's windows must be hidden until that session is switched to. One
+        # query gives the active tab's window set; membership is checked in-mem.
+        cur_tab = await self.vim.current_tabpage()
+        cur_wins = ({int(w) for w in await self.vim.tabpage_wins(cur_tab)}
+                    if cur_tab is not None else None)
         for cid, vim_win in list(self.placements.items()):
             if not self.x.is_managed(cid):
                 self.placements.pop(cid, None)
+                continue
+            if cur_wins is not None and int(vim_win) not in cur_wins:
+                self.x.hide(cid)                  # on another sesh session
                 continue
             if cid == fs:
                 # The fullscreen client is always screen-sized; stacking tracks
