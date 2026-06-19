@@ -17,7 +17,7 @@ REPO="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 mkdir -p "$HOME/.local/bin"
 cp -f "$REPO/sweettalker.py" "$HOME/.local/bin/sweettalk"
 chmod 755 "$HOME/.local/bin/sweettalk"
-echo "installed $HOME/.local/bin/sweettalker"
+echo "installed $HOME/.local/bin/sweettalk"
 
 ZSHRC="$HOME/.zshrc"
 if ! grep -qF "sweettalker.zsh" "$ZSHRC" 2>/dev/null; then

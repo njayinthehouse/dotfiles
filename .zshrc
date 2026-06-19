@@ -34,7 +34,7 @@ alias size='sweettalk size'
 alias foreground='sweettalk foreground'
 alias background='sweettalk background'
 alias palette='sweettalk palette'
-alias confide='sweettalk confide'
+alias guess='sweettalk guess'
 alias learned='sweettalk learned'
 
 # Version control for dotfiles
