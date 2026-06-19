@@ -3,17 +3,18 @@
 
 A *look* is one value per lever:
   prompt      the zsh prompt (curated pool)
-  font        the Alacritty font family (auto-discovered monospace)
+  font        the st font family (auto-discovered monospace)
   size        the font size
-  foreground  the text colour      (Alacritty fg + neovim Normal guifg)
-  background  the window colour     (Alacritty bg + neovim Normal guibg)
-  palette     the 16 ANSI colours   (Alacritty + neovim g:terminal_color_0..15)
+  foreground  the text colour       (st default foreground, OSC 10)
+  background  the window colour      (st default background, OSC 11)
+  palette     the 16 ANSI colours    (st palette, OSC 4)
 
-The session lives inside neovim (nvwm runs `alacritty -e nvim`, panes are nvim
-:terminal buffers), so neovim paints over every cell — Alacritty colour overrides
-only show in the uncovered strip. The colour levers therefore ALSO drive neovim
-over its RPC ($NVIM): Normal/Visual/Search highlights + the :terminal palette.
-Font and size stay with Alacritty (it owns the font).
+The session lives inside neovim (nvwm runs `st -e nvim`, panes are nvim :terminal
+buffers) under `notermguicolors`, so neovim renders every cell in st's own ANSI
+palette and default fg/bg. Recolouring st therefore recolours every pane — no
+per-nvim highlight push needed. A look is painted onto the live st as OSC escapes
+(font OSC 50, fg/bg OSC 10/11, palette OSC 4) written to the pts st shares with
+the session neovim ($NVIM).
 
 You roll a whole look (or tweak one lever) and rate the whole thing 0-10. In
 Stage 1 rolls are random (contrast-filtered so looks stay readable) and ratings
@@ -39,7 +40,6 @@ stay random.
 import json
 import os
 import random
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -49,14 +49,8 @@ DATA_DIR = Path(os.environ.get("SWEETTALKER_DATA",
 STATE = DATA_DIR / "state.json"
 PROMPT_CURRENT = DATA_DIR / "current.zsh"
 
-ALACRITTY_DIR = Path.home() / ".config/alacritty"
-ALACRITTY_CFG = ALACRITTY_DIR / "alacritty.toml"
-LOOK_FILE = ALACRITTY_DIR / "sweettalker.toml"
-LOOK_IMPORT = "~/.config/alacritty/sweettalker.toml"
-
 SCALE = 10
 LEVERS = ["prompt", "font", "size", "foreground", "background", "palette"]
-ANSI = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"]
 MIN_CONTRAST = 4.0          # WCAG-ish; keeps fg/bg legible
 
 
@@ -222,106 +216,66 @@ def _squote(s):
     return "'" + s.replace("'", "'\\''") + "'"
 
 
-def _ensure_import():
-    ALACRITTY_DIR.mkdir(parents=True, exist_ok=True)
-    text = ALACRITTY_CFG.read_text() if ALACRITTY_CFG.exists() else ""
-    if "sweettalker-font.toml" in text:                 # migrate old name
-        text = text.replace("sweettalker-font.toml", "sweettalker.toml")
-        ALACRITTY_CFG.write_text(text)
-        (ALACRITTY_DIR / "sweettalker-font.toml").unlink(missing_ok=True)
-    if "sweettalker.toml" in text:
-        return
-    if "[general]" in text or re.search(r"^\s*import\s*=", text, re.M):
-        sys.stderr.write("sweettalk: add to alacritty.toml [general] import: "
-                         f'"{LOOK_IMPORT}"\n')
-        return
-    ALACRITTY_CFG.write_text(text + f'\n[general]\nimport = ["{LOOK_IMPORT}"]\n')
+def _st_tty():
+    """Path of the pts the outer st shares with the session neovim.
 
-
-def look_toml(look):
-    pal = PALETTES[look["palette"]]
-    lines = ["# written by sweettalker",
-             "[font]", f"size = {float(look['size'])}",
-             "[font.normal]", f'family = "{look["font"]}"',
-             "[colors.primary]",
-             f'foreground = "{look["foreground"]}"',
-             f'background = "{look["background"]}"',
-             "[colors.normal]"]
-    lines += [f'{n} = "{c}"' for n, c in zip(ANSI, pal["normal"])]
-    lines += ["[colors.bright]"]
-    lines += [f'{n} = "{c}"' for n, c in zip(ANSI, pal["bright"])]
-    return "\n".join(lines) + "\n"
-
-
-def ipc_args(look):
-    pal = PALETTES[look["palette"]]
-    args = [f'font.normal.family="{look["font"]}"',
-            f'font.size={float(look["size"])}',
-            f'colors.primary.foreground="{look["foreground"]}"',
-            f'colors.primary.background="{look["background"]}"']
-    args += [f'colors.normal.{n}="{c}"' for n, c in zip(ANSI, pal["normal"])]
-    args += [f'colors.bright.{n}="{c}"' for n, c in zip(ANSI, pal["bright"])]
-    return args
-
-
-# ---------------------------------------------------------------- neovim apply
-# The user lives inside neovim (nvwm launches `alacritty -e nvim`, and panes are
-# nvim :terminal buffers), so neovim paints its own colorscheme over every cell —
-# Alacritty colour overrides only show in the thin uncovered strip. To make the
-# COLOUR levers visible we also drive neovim over its RPC: sweettalk runs inside a
-# nvim :terminal, so $NVIM points at the nvim socket and `nvim --server` reaches
-# it. Font/size stay with Alacritty (it owns the font); only colours go to nvim.
-def _hl_accent(look):
-    """A readable highlight (Visual) bg: the palette colour with best contrast
-    against the foreground, so selected text stays legible."""
-    pal = PALETTES[look["palette"]]
-    cands = pal["normal"] + pal["bright"]
-    return max(cands, key=lambda c: contrast(c, look["foreground"]))
-
-
-def nvim_cmds(look):
-    """Build ONE bar-joined vimscript string mapping the colour levers onto
-    neovim highlights + the :terminal ANSI palette. Pure: no I/O. Assumes
-    termguicolors (gui* attrs)."""
-    pal = PALETTES[look["palette"]]
-    fg, bg = look["foreground"], look["background"]
-    hl = _hl_accent(look)
-    parts = [f"hi Normal guifg={fg} guibg={bg}",
-             f"hi Visual guibg={hl}",
-             f"hi Search guibg={hl} guifg={fg}"]
-    colors16 = pal["normal"] + pal["bright"]      # terminal_color_0..15
-    parts += [f"let g:terminal_color_{i}='{c}'"
-              for i, c in enumerate(colors16)]
-    return " | ".join(parts)
-
-
-def nvim_apply(look):
-    """Apply the colour levers to the live neovim over its RPC (best-effort).
-    No-op unless $NVIM is set and IPC isn't suppressed."""
+    sweettalk runs inside an nvim :terminal, so its own stdout reaches nvim, not
+    st. But $NVIM names the session neovim, whose stdout fd is st's side of the
+    pts; OSC escapes written there are read and applied by st itself."""
     server = os.environ.get("NVIM")
-    if not server or os.environ.get("SWEETTALKER_NO_IPC"):
+    if not server:
+        return None
+    want = server.encode()
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            if (proc / "comm").read_text().strip() != "nvim":
+                continue
+            if want not in (proc / "cmdline").read_bytes():
+                continue
+            tty = os.readlink(proc / "fd/1")
+        except OSError:
+            continue
+        if tty.startswith("/dev/pts/"):
+            return tty
+    return None
+
+
+def st_osc(look):
+    """The OSC escape string that paints a look onto st: font + size (OSC 50),
+    foreground (OSC 10), background (OSC 11), and the 16 ANSI colours (OSC 4;n).
+    Each is BEL-terminated. Pure: no I/O."""
+    pal = PALETTES[look["palette"]]
+    seqs = [f'\033]50;{look["font"]}:size={float(look["size"])}\007',
+            f'\033]10;{look["foreground"]}\007',
+            f'\033]11;{look["background"]}\007']
+    colors16 = pal["normal"] + pal["bright"]      # ANSI 0..15
+    seqs += [f'\033]4;{i};{c}\007' for i, c in enumerate(colors16)]
+    return "".join(seqs)
+
+
+def st_apply(look):
+    """Paint the colour + font levers onto the live st (best-effort). No-op
+    unless $NVIM is set (it names st's pts) and IPC isn't suppressed. st marks
+    every cell dirty on a colour change and reloads/redraws on a font change, so
+    the running neovim recolours and reflows without any per-nvim push."""
+    if os.environ.get("SWEETTALKER_NO_IPC"):
         return
-    expr = "execute('" + nvim_cmds(look).replace("'", "''") + "')"
+    tty = _st_tty()
+    if not tty:
+        return
     try:
-        subprocess.run(["nvim", "--server", server, "--remote-expr", expr],
-                       check=False, capture_output=True, timeout=3)
-    except (OSError, subprocess.SubprocessError):
+        with open(tty, "wb") as f:
+            f.write(st_osc(look).encode())
+    except OSError:
         pass
 
 
 def apply_look(look):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     PROMPT_CURRENT.write_text("PROMPT=" + _squote(PROMPT_MAP[look["prompt"]]) + "\n")
-    _ensure_import()
-    LOOK_FILE.write_text(look_toml(look))
-    if os.environ.get("SWEETTALKER_NO_IPC"):
-        return
-    try:
-        subprocess.run(["alacritty", "msg", "config", "-w", "-1", *ipc_args(look)],
-                       check=False, capture_output=True, timeout=3)
-    except (OSError, subprocess.SubprocessError):
-        pass
-    nvim_apply(look)
+    st_apply(look)
 
 
 # --------------------------------------------------------------------- state

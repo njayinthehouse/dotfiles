@@ -1,8 +1,9 @@
 #!/bin/sh
 # clean.sh — undo install.sh: remove sweettalker's installed binary, learned
-# state, the Alacritty look file + import, and its ~/.zshrc wiring (the
-# SWEETTALKER_REPO var, the alias block, and the self-install block). The repo
-# itself (~/sweettalker) is left untouched, so you can reinstall any time.
+# state, and its ~/.zshrc wiring (the SWEETTALKER_REPO var, the alias block, and
+# the self-install block). The repo itself (~/sweettalker) is left untouched, so
+# you can reinstall any time. (Looks are painted onto st live via OSC escapes,
+# so there are no config files to remove.)
 
 set -eu
 
@@ -11,17 +12,7 @@ ZSHRC="$HOME/.zshrc"
 rm -f "$HOME/.local/bin/sweettalk" "$HOME/.local/bin/sweettalker"
 rm -f "$HOME/.local/bin/.sweettalker-installed"
 rm -rf "$HOME/.local/share/sweettalker"          # learned ratings + current.zsh
-rm -f "$HOME/.config/alacritty/sweettalker.toml" \
-      "$HOME/.config/alacritty/sweettalker-font.toml"
-echo "removed sweettalker's binary, state, and look file"
-
-# Strip the look import from alacritty.toml (leaves the rest intact).
-ACFG="$HOME/.config/alacritty/alacritty.toml"
-if [ -f "$ACFG" ] && grep -q 'sweettalker' "$ACFG"; then
-    cp "$ACFG" "$ACFG.bak"
-    grep -v 'sweettalker' "$ACFG" > "$ACFG.tmp" && mv "$ACFG.tmp" "$ACFG"
-    echo "removed look import from $ACFG (backup at $ACFG.bak)"
-fi
+echo "removed sweettalker's binary and state"
 
 # Strip sweettalker bits from ~/.zshrc as two contiguous ranges (the alias
 # block and the self-install block) plus the SWEETTALKER_REPO line. Other

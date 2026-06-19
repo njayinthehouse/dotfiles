@@ -7,39 +7,35 @@ A *look* is one value per lever:
 | Lever | What it sets | Applied via |
 |---|---|---|
 | `prompt` | the zsh prompt | `current.zsh` (PROMPT) |
-| `font` | Alacritty font family | IPC + `sweettalker.toml` |
-| `size` | font size | IPC + `sweettalker.toml` |
-| `foreground` | text colour | Alacritty IPC + neovim `Normal` guifg |
-| `background` | window colour | Alacritty IPC + neovim `Normal` guibg |
-| `palette` | the 16 ANSI colours | Alacritty IPC + neovim `g:terminal_color_0..15` |
+| `font` | st font family | OSC 50 |
+| `size` | font size | OSC 50 |
+| `foreground` | text colour | st default fg (OSC 10) |
+| `background` | window colour | st default bg (OSC 11) |
+| `palette` | the 16 ANSI colours | st palette (OSC 4) |
 
-You roll a whole look (or tweak one lever) and rate the whole thing **0–10**.
-Font/size apply **live** to the running Alacritty over its IPC socket and are
-persisted to an imported config file so a freshly-launched Alacritty matches.
+You roll a whole look (or tweak one lever) and rate the whole thing **0–10**. The
+colour and font levers apply **live** to the running st via OSC escape sequences.
 
-### Colours go to neovim, not just Alacritty
+### One st, every pane
 
-The session lives **inside neovim** (nvwm launches `alacritty -e nvim`, and panes
-are neovim `:terminal` buffers). neovim paints its own colorscheme over every
-cell, so Alacritty colour overrides are invisible except in the thin strip below
-neovim. So the colour levers also drive **neovim** — what you actually see —
-over its RPC (`$NVIM`, set because sweettalk runs in a neovim `:terminal`):
+The session lives **inside neovim** (nvwm launches `st -e nvim`, and panes are
+neovim `:terminal` buffers) under `notermguicolors`, so neovim renders every cell
+using st's own ANSI palette and default fg/bg — it owns no colours of its own.
+Recolouring **st** therefore recolours every pane at once, with no per-nvim push.
 
-- `foreground` → neovim `Normal` guifg
-- `background` → neovim `Normal` guibg
-- `highlight`/accent → `Visual` and `Search` guibg (the palette colour with the
-  best contrast against the foreground, so selections stay readable)
-- `palette` → `g:terminal_color_0..15` (normal[0..7] then bright[0..7]) so
-  `:terminal` ANSI colours match
+sweettalk runs inside a neovim `:terminal`, so its own stdout reaches neovim, not
+the outer st. It finds the pts that st shares with the session neovim (via the
+`$NVIM` process's stdout fd) and writes the OSC escapes there, so st reads and
+applies them itself:
 
-It's applied via `nvim --server "$NVIM" --remote-expr "execute('…')"` (no editor
-mode change). The Alacritty colour IPC is still sent too, for the uncovered strip
-and fresh-launch consistency.
+- `font`/`size` → `OSC 50 ; <family>:size=<n>` (st reloads the font and reflows)
+- `foreground` → `OSC 10` (st default foreground)
+- `background` → `OSC 11` (st default background)
+- `palette` → `OSC 4 ; N ; <hex>` for N in 0..15 (normal[0..7] then bright[0..7])
 
-> **Caveat:** if you later `:colorscheme …` (or a plugin re-applies one) inside
-> neovim, it overrides these `Normal`/`Visual`/`terminal_color` settings — roll
-> again to re-apply. sweettalk drives the highlights directly rather than owning
-> a colorscheme.
+st marks every cell dirty on a colour change and redraws/resizes on a font
+change, so the running neovim recolours and reflows immediately — no
+`:colorscheme` interaction, because sweettalk never touches neovim's highlights.
 
 ## Install
 
@@ -79,10 +75,9 @@ is written single-quoted, so `$(...)` / `%(...)` reach the shell verbatim):
 - State: `~/.local/share/sweettalker/state.json` — the current look, autoroll
   flag, and the list of `{look, rating}` you've confided.
 - The prompt is written to `current.zsh` (sourced by `sweettalker.zsh`); the
-  Alacritty levers are written to `sweettalker.toml` (imported by
-  `alacritty.toml`) **and** pushed live via `alacritty msg config`. The colour
-  levers are additionally pushed to the live neovim via `nvim --server --remote-expr`
-  (best-effort; only when `$NVIM` is set and `SWEETTALKER_NO_IPC` is not).
+  colour and font levers are painted onto the live st via OSC escapes written to
+  the pts st shares with the session neovim (best-effort; only when `$NVIM` is
+  set and `SWEETTALKER_NO_IPC` is not).
 - Colours stay legible: candidate looks are contrast-filtered so the foreground
   is never too close to the background.
 

@@ -6,9 +6,9 @@
 # Re-runnable, and side-effect-light: it installs the binary, adds a source
 # line to ~/.zshrc if absent, and stamps itself. It does NOT change your
 # prompt or font — the prompt is rolled lazily on first shell (by
-# sweettalker.zsh) and the Alacritty font import is added lazily on your first
-# `font-roll`. The .zshrc self-install block re-runs this whenever the repo
-# changes (nvwm-style).
+# sweettalker.zsh) and the look is painted onto st via OSC escapes on apply.
+# The .zshrc self-install block re-runs this whenever the repo changes
+# (nvwm-style).
 
 set -eu
 
