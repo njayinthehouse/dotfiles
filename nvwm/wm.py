@@ -418,6 +418,13 @@ class XTalker:
         self._atom_net_wm_check = self.dpy.intern_atom('_NET_SUPPORTING_WM_CHECK')
         self._atom_net_wm_name = self.dpy.intern_atom('_NET_WM_NAME')
         self._atom_utf8 = self.dpy.intern_atom('UTF8_STRING')
+        # ICCCM WM_STATE (4.1.3.1). Reparenting WMs MUST set this on the managed
+        # client window: toolkits walk the tree from the root and identify the
+        # real client toplevel under the pointer by its WM_STATE. Without it,
+        # GTK's drag target-finding can't resolve a drop window, so Firefox tab
+        # drag/merge between windows fails (the tab snaps back) even though the
+        # client has XdndAware. Same property that xdotool/xwininfo rely on.
+        self._atom_wm_state = self.dpy.intern_atom('WM_STATE')
         self._wm_check: XWindow | None = None
         self._esc_kc = self.dpy.keysym_to_keycode(XK.XK_Escape)
 
@@ -535,6 +542,15 @@ class XTalker:
         except BadWindow:
             pass
 
+    def _set_wm_state(self, client: XWindow, state: int) -> None:
+        """Set ICCCM WM_STATE on the client (NormalState=1, WithdrawnState=0).
+        Type is the WM_STATE atom itself; value is [state, icon_window]."""
+        try:
+            client.change_property(self._atom_wm_state, self._atom_wm_state, 32,
+                                   [state, X.NONE])
+        except BadWindow:
+            pass
+
     def frame(self, client: XWindow, x: int, y: int, w: int, h: int) -> None:
         """Create a frame at (x, y, w, h) and reparent the client into it."""
         if client.id in self._frames:
@@ -559,6 +575,7 @@ class XTalker:
                         X.GrabModeSync, X.GrabModeAsync, X.NONE, X.NONE)
         frm.map()
         client.map()
+        self._set_wm_state(client, 1)  # NormalState — ICCCM, enables DND target-finding
         self._frames[client.id] = frm
         self._clients[frm.id] = client
         self._notify_configure(client, x, y, max(1, w), max(1, h))
@@ -567,9 +584,11 @@ class XTalker:
         frm = self._frames.pop(client_id, None)
         if frm is None:
             return
-        self._clients.pop(frm.id, None)
+        client = self._clients.pop(frm.id, None)
         if self._focused == client_id:
             self._focused = None
+        if client is not None:
+            self._set_wm_state(client, 0)  # WithdrawnState — ICCCM, no longer managed
         try:
             frm.destroy()
         except BadWindow:
