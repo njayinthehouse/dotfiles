@@ -94,3 +94,35 @@ vim.api.nvim_create_autocmd({ "WinNew", "TermOpen" }, {
 
 -- Manual refresh from inside neovim: :NvwmRefresh
 vim.api.nvim_create_user_command("NvwmRefresh", _G.nvwm_notify, {})
+
+-- Toggle fullscreen for the current pane's GUI client: :NvwmFull
+-- (the WM toggles, so calling it on an already-full pane restores it). Bind it
+-- to taste, e.g.  vim.keymap.set("n", "<leader>f", "<cmd>NvwmFull<cr>")
+vim.api.nvim_create_user_command("NvwmFull", function()
+  vim.g.nvwm_fullscreen_pending = vim.api.nvim_get_current_win()
+  _G.nvwm_notify()
+end, {})
+
+-- Enter "GUI mode": in a pane backed by an X client, the placeholder neovim
+-- window is empty, so `i` (and a/I/A) shouldn't open neovim's insert mode —
+-- instead it hands the keyboard to the GUI client so its own keys work (arrows
+-- scroll, etc.). The WM marks such windows with w:nvwm_gui = <client id> at map
+-- time (see wm.py) and, on the 'nvwm_enter_gui' notification, focuses + raises
+-- that client (see WindowManager._enter_gui). Ctrl+Esc round-trips back to
+-- normal mode. Ordinary panes keep the default insert behaviour.
+function _G.nvwm_enter_gui(fallback)
+  local ok, cid = pcall(vim.api.nvim_win_get_var, 0, "nvwm_gui")
+  if ok and cid then
+    local chan = _G.nvwm_chan
+    if chan and not pcall(vim.rpcnotify, chan, "nvwm_enter_gui") then
+      _G.nvwm_chan = nil          -- channel died; republished on reconnect
+    end
+    return ""                     -- swallow the key: the WM moves focus
+  end
+  return fallback                 -- not a GUI pane: behave like the real key
+end
+
+for _, key in ipairs({ "i", "a", "I", "A" }) do
+  vim.keymap.set("n", key, function() return _G.nvwm_enter_gui(key) end,
+    { expr = true, desc = "nvwm: focus GUI client or " .. key })
+end

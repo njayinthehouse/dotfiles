@@ -58,7 +58,7 @@ import asyncio
 import signal
 import sys
 from typing import Any, Callable, NamedTuple
-from Xlib import X
+from Xlib import X, XK, Xatom
 from Xlib.display import Display
 from Xlib.error import BadAccess, BadWindow
 from Xlib.protocol import event as xevent
@@ -128,6 +128,7 @@ class Pane(NamedTuple):
 class WMEvent(NamedTuple):
     kind:   str         # 'map_request' | 'mapped' | 'entered' | 'unmapped' | 'destroyed'
     window: XWindow
+    arg:    Any = None  # event-specific payload (e.g. the _NET_WM_STATE action)
 
 
 Rect = tuple[int, int, int, int]   # (x, y, w, h) in pixels
@@ -385,6 +386,12 @@ class VimTalker:
     async def startinsert(self) -> None:
         await self.command("startinsert")
 
+    async def input(self, keys: str) -> None:
+        """Feed key input to neovim (e.g. '<C-\\><C-n>' to force normal mode).
+        Unlike nvim_command, this respects neovim's mode machinery, so it can
+        leave terminal-insert mode where :stopinsert cannot."""
+        await self._req("nvim_input", keys)
+
 
 # ============================================================================
 #  XTalker — X11 frame management in pixels (synchronous Xlib)
@@ -403,6 +410,16 @@ class XTalker:
         self._focused: int | None = None
         self._atom_wm_type = self.dpy.intern_atom('_NET_WM_WINDOW_TYPE')
         self._atom_type_normal = self.dpy.intern_atom('_NET_WM_WINDOW_TYPE_NORMAL')
+        # EWMH fullscreen — apps (notably SDL/Steam games) toggle this via a
+        # _NET_WM_STATE ClientMessage to root, or preset it before mapping.
+        self._atom_net_supported = self.dpy.intern_atom('_NET_SUPPORTED')
+        self._atom_net_wm_state = self.dpy.intern_atom('_NET_WM_STATE')
+        self._atom_net_wm_state_fs = self.dpy.intern_atom('_NET_WM_STATE_FULLSCREEN')
+        self._atom_net_wm_check = self.dpy.intern_atom('_NET_SUPPORTING_WM_CHECK')
+        self._atom_net_wm_name = self.dpy.intern_atom('_NET_WM_NAME')
+        self._atom_utf8 = self.dpy.intern_atom('UTF8_STRING')
+        self._wm_check: XWindow | None = None
+        self._esc_kc = self.dpy.keysym_to_keycode(XK.XK_Escape)
 
     def claim_wm(self) -> None:
         """Grab SubstructureRedirect on root, or exit if a WM already has it."""
@@ -429,6 +446,42 @@ class XTalker:
 
         self.dpy.set_error_handler(log_error)
 
+    def grab_keys(self) -> None:
+        """Reserve the global modal chord: Ctrl+Escape -> normal mode.
+
+        A passive grab on root fires regardless of which window holds the
+        keyboard — including a focused GUI client, which otherwise swallows
+        every key and would leave the user stuck with no way back to neovim.
+        We grab the Lock/NumLock-modified variants too so the chord works with
+        CapsLock or NumLock on."""
+        for extra in (0, X.LockMask, X.Mod2Mask, X.LockMask | X.Mod2Mask):
+            self.root.grab_key(self._esc_kc, X.ControlMask | extra, False,
+                               X.GrabModeAsync, X.GrabModeAsync)
+        self.dpy.sync()
+
+    def advertise_ewmh(self) -> None:
+        """Announce ourselves as an EWMH-aware WM that supports fullscreen.
+
+        Toolkits (SDL, GTK, SFML) only take the managed `_NET_WM_STATE_FULLSCREEN`
+        path if they can see (a) a `_NET_SUPPORTING_WM_CHECK` window proving a
+        conformant WM is present and (b) fullscreen listed in `_NET_SUPPORTED`.
+        Without this they fall back to override-redirect grabs that bypass us
+        entirely. The check window is an off-screen InputOnly child that just has
+        to exist and carry our name.
+        """
+        self._wm_check = self.root.create_window(
+            -1, -1, 1, 1, 0, X.CopyFromParent, X.InputOnly, X.CopyFromParent)
+        for win in (self.root, self._wm_check):
+            win.change_property(self._atom_net_wm_check, Xatom.WINDOW, 32,
+                                [self._wm_check.id])
+        self._wm_check.change_property(self._atom_net_wm_name, self._atom_utf8,
+                                       8, b"nvwm")
+        self.root.change_property(
+            self._atom_net_supported, Xatom.ATOM, 32,
+            [self._atom_net_wm_state, self._atom_net_wm_state_fs,
+             self._atom_net_wm_check])
+        self.dpy.flush()
+
     def screen_size(self) -> tuple[int, int]:
         return (self.screen.width_in_pixels, self.screen.height_in_pixels)
 
@@ -453,6 +506,35 @@ class XTalker:
         except BadWindow:
             return False
 
+    def _client_window(self, client_id: int) -> XWindow | None:
+        frm = self._frames.get(client_id)
+        return self._clients.get(frm.id) if frm is not None else None
+
+    def wants_fullscreen(self, window: XWindow) -> bool:
+        """Does this window already declare `_NET_WM_STATE_FULLSCREEN`?
+        Checked at map time so a game that presets the hint comes up full."""
+        try:
+            prop = window.get_full_property(self._atom_net_wm_state, Xatom.ATOM)
+        except BadWindow:
+            return False
+        return prop is not None and self._atom_net_wm_state_fs in prop.value
+
+    def set_net_fullscreen(self, client_id: int, on: bool) -> None:
+        """Write `_NET_WM_STATE_FULLSCREEN` into the client's state, so an app
+        that asked to (un)fullscreen sees the WM confirm it."""
+        client = self._client_window(client_id)
+        if client is None:
+            return
+        try:
+            prop = client.get_full_property(self._atom_net_wm_state, Xatom.ATOM)
+            atoms = [a for a in (prop.value if prop is not None else [])
+                     if a != self._atom_net_wm_state_fs]
+            if on:
+                atoms.append(self._atom_net_wm_state_fs)
+            client.change_property(self._atom_net_wm_state, Xatom.ATOM, 32, atoms)
+        except BadWindow:
+            pass
+
     def frame(self, client: XWindow, x: int, y: int, w: int, h: int) -> None:
         """Create a frame at (x, y, w, h) and reparent the client into it."""
         if client.id in self._frames:
@@ -461,8 +543,7 @@ class XTalker:
             x, y, max(1, w), max(1, h), 0,
             self.screen.root_depth, X.InputOutput, X.CopyFromParent,
             background_pixel=self.screen.black_pixel,
-            event_mask=(X.SubstructureRedirectMask
-                        | X.SubstructureNotifyMask | X.EnterWindowMask))
+            event_mask=(X.SubstructureRedirectMask | X.SubstructureNotifyMask))
         self._ignore_unmaps += 1
         try:
             client.reparent(frm, 0, 0)
@@ -470,7 +551,12 @@ class XTalker:
             frm.destroy()
             return
         client.configure(width=max(1, w), height=max(1, h))
-        client.change_attributes(event_mask=X.EnterWindowMask)
+        # Click-to-focus: a SYNCHRONOUS button grab freezes the pointer on press
+        # so we can switch focus/mode first, then ReplayPointer (see _translate)
+        # delivers the same click to the app — nothing is swallowed. This is the
+        # only path that changes focus now; hovering deliberately does not.
+        frm.grab_button(1, X.AnyModifier, False, X.ButtonPressMask,
+                        X.GrabModeSync, X.GrabModeAsync, X.NONE, X.NONE)
         frm.map()
         client.map()
         self._frames[client.id] = frm
@@ -535,16 +621,6 @@ class XTalker:
             self.dpy.sync()
             return True
         except BadWindow:
-            return False
-
-    def button_pressed(self) -> bool:
-        """True if any pointer button is held — i.e. a drag is in progress.
-        Used to suppress focus-follows-mouse so we don't abort an app's own
-        drag (notably Firefox tab tear-off/merge between windows)."""
-        try:
-            return bool(self.root.query_pointer().mask
-                        & (X.Button1Mask | X.Button2Mask | X.Button3Mask))
-        except Exception:
             return False
 
     @property
@@ -619,10 +695,28 @@ class XTalker:
         elif ev.type == X.MapNotify:
             if ev.window.id in self._frames:
                 return WMEvent("mapped", ev.window)
-        elif ev.type == X.EnterNotify:
-            client = self._resolve(ev.window)
+        elif ev.type == X.KeyPress:
+            if ev.detail == self._esc_kc and ev.state & X.ControlMask:
+                return WMEvent("to_normal", self.root)
+        elif ev.type == X.ButtonPress:
+            # Pointer is frozen by the sync grab; release it back to the app
+            # immediately (focus/mode switch happens in the async handler), so
+            # the click still lands where the user aimed.
+            client = self._clients.get(ev.window.id)
+            try:
+                self.dpy.allow_events(X.ReplayPointer, ev.time)
+            except BadWindow:
+                pass
             if client is not None:
-                return WMEvent("entered", client)
+                return WMEvent("clicked", client)
+        elif ev.type == X.ClientMessage:
+            # EWMH _NET_WM_STATE: data = [action, prop1, prop2, source, 0].
+            # action 0=remove 1=add 2=toggle. We act only on the fullscreen bit.
+            if ev.client_type == self._atom_net_wm_state:
+                fmt, vals = ev.data
+                if fmt == 32 and self._atom_net_wm_state_fs in (vals[1], vals[2]):
+                    if ev.window.id in self._frames:
+                        return WMEvent("net_fullscreen", ev.window, vals[0])
         elif ev.type == X.ConfigureRequest:
             self._handle_configure(ev)
             return None
@@ -653,13 +747,6 @@ class XTalker:
             ev.window.configure(x=ev.x, y=ev.y, width=ev.width,
                                 height=ev.height, border_width=ev.border_width)
 
-    def _resolve(self, window: XWindow) -> XWindow | None:
-        if window.id in self._clients:
-            return self._clients[window.id]
-        if window.id in self._frames:
-            return window
-        return None
-
 
 # ============================================================================
 #  WindowManager — glue
@@ -672,6 +759,11 @@ class WindowManager:
         self.vim = VimTalker(self.rpc)
         self.x = XTalker()
         self.x.claim_wm()
+        self.x.grab_keys()                        # reserve Ctrl+Esc globally
+        self.x.advertise_ewmh()                   # announce EWMH fullscreen support
+        self.mode: str = "insert"                 # 'insert' (content has kbd) | 'normal'
+        self.fullscreen: int | None = None        # client id flagged fullscreen (≤1)
+        self._fullscreen_app = False              # True if app/EWMH-driven (vs `pane full`)
         sw, sh = self.x.screen_size()
         self.sw, self.sh = sw, sh
         self.nvim_host_id: int | None = None
@@ -682,13 +774,14 @@ class WindowManager:
         self._dispatch: dict[str, Callable[[XWindow], Any]] = {
             "map_request": self.on_map_request,
             "mapped":      self.on_mapped,
-            "entered":     self.on_entered,
+            "clicked":     self.on_clicked,
+            "to_normal":   self.on_to_normal,
             "unmapped":    self.on_unmapped,
             "destroyed":   self.on_destroyed,
         }
         # event kinds that change layout and therefore warrant a resync
         self._dirtying: frozenset[str] = frozenset(
-            {"map_request", "unmapped", "destroyed"})
+            {"map_request", "unmapped", "destroyed", "net_fullscreen"})
 
     # --- cell <-> pixel ---
 
@@ -750,21 +843,103 @@ class WindowManager:
             self.x.set_stacking(client.id, X.Below)
         elif is_normal and pane is not None:
             self.placements[client.id] = pane.win
+            # mark the placeholder window so neovim's normal-mode `i` knows this
+            # pane hands the keyboard to a GUI client rather than entering insert
+            await self.vim.set_win_var(pane.win, "nvwm_gui", client.id)
             self.x.set_stacking(client.id, X.Above)
+            # a game that presets _NET_WM_STATE_FULLSCREEN comes up full
+            if self.x.wants_fullscreen(client):
+                await self._set_fullscreen(client.id, app=True)
         else:
             self.x.set_stacking(client.id, X.Above)
 
     async def on_mapped(self, client: XWindow) -> None:
-        self.x.focus(client.id)
-
-    async def on_entered(self, client: XWindow) -> None:
-        # Don't steal focus / restack while a button is held: focus-follows-
-        # mouse firing mid-drag aborts app drags like Firefox tab tear-off.
-        if self.x.button_pressed():
-            return
+        # A freshly mapped GUI grabs the keyboard and becomes the current pane,
+        # i.e. launching an app drops you straight into it (insert/GUI mode).
         self.x.focus(client.id)
         if client.id != self.nvim_host_id:
-            self.x.set_stacking(client.id, X.Above)
+            win = self.placements.get(client.id)
+            if win is not None:
+                await self.vim.set_current_win(win)
+            await self._set_mode("insert")
+        self.poke()                               # re-stack any fullscreen client
+
+    async def on_clicked(self, client: XWindow) -> None:
+        """Click-to-focus: enter the clicked pane's content (insert/GUI mode).
+
+        The click itself was already replayed to the app (see XTalker); here we
+        just move the keyboard. For a GUI pane we also make its neovim window
+        current, so a later Ctrl+Esc -> `i` round-trips to the same pane. For
+        the neovim host, neovim's own mouse handling picks the pane and, for a
+        terminal, drops into terminal mode (see nvwm.lua)."""
+        self.x.focus(client.id)
+        if client.id != self.nvim_host_id:
+            win = self.placements.get(client.id)
+            if win is not None:
+                await self.vim.set_current_win(win)
+        await self._set_mode("insert")
+        self.poke()                               # re-stack any fullscreen client
+
+    async def on_to_normal(self, _window: XWindow) -> None:
+        """Ctrl+Esc from anywhere -> normal mode: pull the keyboard back to the
+        neovim host and force it out of insert/terminal mode."""
+        # A manual `pane full` is restored to its tiled geometry on Ctrl+Esc;
+        # app/EWMH (game) fullscreens stay full and merely drop below the host,
+        # since clearing them would force a resize the app fights (flicker).
+        if self.fullscreen is not None and not self._fullscreen_app:
+            await self._set_fullscreen(None)
+        if self.nvim_host_id is not None:
+            self.x.focus(self.nvim_host_id)
+        await self.vim.input(r"<C-\><C-n>")
+        await self._set_mode("normal")
+        self.poke()       # drop any fullscreen client below the host so neovim shows
+
+    async def _enter_gui(self) -> None:
+        """Hand the keyboard to the GUI client of neovim's current pane.
+        Triggered by the neovim-side `i` mapping (nvwm_enter_gui)."""
+        win = await self.vim.current_win()
+        if win is None:
+            return
+        for cid, w in self.placements.items():
+            if int(w) == int(win) and self.x.is_managed(cid):
+                self.x.focus(cid)
+                self.x.set_stacking(cid, X.Above)
+                await self._set_mode("insert")
+                self.poke()                       # re-stack if this is fullscreen
+                return
+
+    async def on_net_fullscreen(self, client: XWindow, action: int) -> None:
+        """Honor an app's _NET_WM_STATE_FULLSCREEN request (add/remove/toggle)."""
+        cid = client.id
+        if not self.x.is_managed(cid):
+            return
+        on = {0: False, 1: True}.get(action, self.fullscreen != cid)  # 2=toggle
+        await self._set_fullscreen(cid if on else None, app=True)
+
+    async def _set_fullscreen(self, cid: int | None, app: bool = False) -> None:
+        """Flag (or clear) the single fullscreen client. resync() does the
+        actual sizing/stacking; here we just record it, write the EWMH state
+        back so the app gets confirmation, and pull focus onto a new one.
+        `app` marks an app/EWMH-driven request so Ctrl+Esc knows not to
+        un-fullscreen it (see on_to_normal)."""
+        prev = self.fullscreen
+        if prev is not None and prev != cid:
+            self.x.set_net_fullscreen(prev, False)
+        self.fullscreen = cid
+        self._fullscreen_app = app if cid is not None else False
+        if cid is not None:
+            self.x.set_net_fullscreen(cid, True)
+            self.x.focus(cid)
+            await self._set_mode("insert")
+        elif prev is not None:
+            self.x.set_net_fullscreen(prev, False)
+        self.poke()
+
+    async def _set_mode(self, mode: str) -> None:
+        if mode == self.mode:
+            return
+        self.mode = mode
+        await self.vim.set_var("nvwm_mode", mode)   # for the statusline chip
 
     async def on_unmapped(self, client: XWindow) -> None:
         await self._forget(client.id)
@@ -773,6 +948,8 @@ class WindowManager:
         await self._forget(client.id)
 
     async def _forget(self, client_id: int) -> None:
+        if self.fullscreen == client_id:
+            self.fullscreen = None
         vim_win = self.placements.pop(client_id, None)
         if vim_win is not None:
             await self.vim.close_pane(vim_win)
@@ -812,13 +989,42 @@ class WindowManager:
         elif cid2 is not None and h1 is not None:
             self.placements[cid2] = h1
 
+    async def _check_fullscreen_signal(self) -> None:
+        """Honor `pane full`, which sets g:nvwm_fullscreen_pending = <winid> and
+        notifies us. We map that neovim window to its GUI client and toggle the
+        fullscreen flag on it (clearing it if that client is already full)."""
+        req = await self.vim.var("nvwm_fullscreen_pending")
+        if not req:
+            return
+        await self.vim.set_var("nvwm_fullscreen_pending", 0)
+        winid = int(req)
+        cid = next((c for c, wh in self.placements.items()
+                    if int(wh) == winid), None)
+        if cid is None:
+            return                    # a neovim-only pane has no client to blow up
+        await self._set_fullscreen(None if self.fullscreen == cid else cid)
+
     async def resync(self) -> None:
         if self.host_geom is None:
             return
         await self._check_swap_signal()
+        await self._check_fullscreen_signal()
+        fs = self.fullscreen
+        if fs is not None and not self.x.is_managed(fs):
+            fs = self.fullscreen = None
         for cid, vim_win in list(self.placements.items()):
             if not self.x.is_managed(cid):
                 self.placements.pop(cid, None)
+                continue
+            if cid == fs:
+                # The fullscreen client is always screen-sized; stacking tracks
+                # focus — raised above everything while focused, dropped below
+                # the neovim host (so the tiled workspace shows) once you leave
+                # it via Ctrl+Esc. No resize on focus change → no game flicker.
+                self.x.show(cid)
+                self.x.move_resize(cid, 0, 0, self.sw, self.sh)
+                self.x.set_stacking(
+                    cid, X.Above if self.x.focused == cid else X.Below)
                 continue
             pane = await self.vim.pane_info(vim_win)
             if pane is None:
@@ -831,6 +1037,9 @@ class WindowManager:
             self.x.show(cid)
             self.x.move_resize(cid, x, y, w, h)
             self.x.set_stacking(cid, X.Above)
+        # raise the focused fullscreen client last so it sits above the tiles
+        if fs is not None and self.x.is_managed(fs) and self.x.focused == fs:
+            self.x.set_stacking(fs, X.Above)
 
     # --- tasks ---
 
@@ -860,9 +1069,12 @@ class WindowManager:
         assert self._xq is not None
         while True:
             ev = await self._xq.get()
-            handler = self._dispatch.get(ev.kind)
-            if handler is not None:
-                await handler(ev.window)
+            if ev.kind == "net_fullscreen":
+                await self.on_net_fullscreen(ev.window, ev.arg)
+            else:
+                handler = self._dispatch.get(ev.kind)
+                if handler is not None:
+                    await handler(ev.window)
             if ev.kind in self._dirtying:
                 self.poke()
             self.x.flush()
@@ -884,6 +1096,7 @@ class WindowManager:
                 if not await self.vim.publish_chan(chan):
                     raise ConnectionError("could not publish nvwm_chan")
                 print(f"nvwm: connected to nvim (channel {chan})", file=sys.stderr)
+                await self.vim.set_var("nvwm_mode", self.mode)
                 self.poke()                              # fresh attach: sync once
                 await self.rpc.wait_closed()
                 print("nvwm: nvim closed the connection; reconnecting",
@@ -898,6 +1111,11 @@ class WindowManager:
     def _on_notification(self, method: str, params: list[Any]) -> None:
         if method == "nvwm_dirty":
             self.poke()
+        elif method == "nvwm_enter_gui":
+            # neovim asked us to focus the current pane's GUI client. Runs as a
+            # task because this callback is synchronous and must not block the
+            # reader; the resync_task/x_consumer order is unaffected.
+            asyncio.create_task(self._enter_gui())
 
     async def resync_task(self) -> None:
         """The only consumer of the dirty flag: debounce, then resync."""

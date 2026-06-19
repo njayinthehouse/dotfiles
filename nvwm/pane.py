@@ -6,6 +6,7 @@ pane — manage neovim panes from the shell.
     pane rename {<id>} <name>   rename the current pane {or id} to name
     pane ls {<regex>}           list panes, optionally filtered
     pane swap <id1> {<id2>}     swap pane id1 with current {or id2}, incl. GUI
+    pane full {<id>}            toggle fullscreen for the current {or named} pane
     pane kill {<id>}            kill current pane {or the named one}
     pane goto {<id>}            jump to a pane {or last visited}
 
@@ -205,6 +206,22 @@ async def cmd_swap(vt: VimTalker, args: list[str]) -> None:
     await vt.notify()
 
 
+async def cmd_full(vt: VimTalker, args: list[str]) -> None:
+    """Toggle fullscreen for a pane's GUI client. The WM owns the policy; we
+    just hand it the target window id (same pending-var path as swap)."""
+    if args:
+        w = await resolve(vt, args[0])
+        if w is None:
+            print(f"pane full: not found: {args[0]}", file=sys.stderr)
+            return
+    else:
+        w = await vt.current_win()
+    if w is None:
+        return
+    await vt.set_var("nvwm_fullscreen_pending", int(w))
+    await vt.notify()
+
+
 COMMANDS = {
     "new":    cmd_new,
     "rename": cmd_rename,
@@ -212,12 +229,13 @@ COMMANDS = {
     "kill":   cmd_kill,
     "goto":   cmd_goto,
     "swap":   cmd_swap,
+    "full":   cmd_full,
 }
 
 
 async def amain() -> None:
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
-        print("usage: pane {new|rename|ls|swap|kill|goto} [args...]",
+        print("usage: pane {new|rename|ls|swap|full|kill|goto} [args...]",
               file=sys.stderr)
         sys.exit(1)
     sock = os.environ.get("NVIM")
