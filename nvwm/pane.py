@@ -7,8 +7,10 @@ pane — manage neovim panes from the shell.
     pane ls {<regex>}           list panes, optionally filtered
     pane swap <id1> {<id2>}     swap pane id1 with current {or id2}, incl. GUI
     pane full {<id>}            toggle fullscreen for the current {or named} pane
+    pane min {<id>}             minimize a pane (removes the split, keeps it)
     pane kill {<id>}            kill current pane {or the named one}
-    pane goto {<id>}            jump to a pane {or last visited}
+    pane goto {<id>}            jump to a pane {or last visited}; restores a
+                                minimized pane back into a split
 
 Must be run inside a neovim :terminal ($NVIM set). Shares VimTalker with the
 WM, so it speaks the same async msgpack-rpc — no pynvim, no second event loop.
@@ -82,6 +84,21 @@ async def cmd_ls(vt: VimTalker, args: list[str]) -> None:
         tag = " [terminal]" if bt == "terminal" else ""
         print(f"{mark} {id:<12} {name}{tag}")
 
+    # minimized panes have no window; the WM records them in g:nvwm_minimized
+    # as { name: [bufnr, client_id] }. List them last, marked with a leading '-'.
+    mini = await vt.var("nvwm_minimized")
+    if isinstance(mini, dict):
+        for id, entry in mini.items():
+            buf = int(entry[0]) if entry else 0
+            info = await vt.buf_info(buf) if buf else None
+            name = info[0] if info else ""
+            bt = info[1] if info else ""
+            name = name.replace(os.path.expanduser("~"), "~") if name else "[empty]"
+            if regex and not (re.search(regex, id) or re.search(regex, name)):
+                continue
+            tag = " [terminal]" if bt == "terminal" else ""
+            print(f"- {id:<12} {name}{tag}")
+
 
 async def cmd_kill(vt: VimTalker, args: list[str]) -> None:
     if args:
@@ -111,6 +128,12 @@ async def cmd_goto(vt: VimTalker, args: list[str]) -> None:
 
     w = await resolve(vt, args[0])
     if w is None:
+        # not a live pane — maybe it's minimized; ask the WM to restore it
+        mini = await vt.var("nvwm_minimized")
+        if isinstance(mini, dict) and args[0] in mini:
+            await vt.set_var("nvwm_restore_pending", args[0])
+            await vt.notify()
+            return
         print(f"pane goto: not found: {args[0]}", file=sys.stderr)
         return
     await vt.set_current_win(w)
@@ -222,6 +245,26 @@ async def cmd_full(vt: VimTalker, args: list[str]) -> None:
     await vt.notify()
 
 
+async def cmd_min(vt: VimTalker, args: list[str]) -> None:
+    """Minimize a pane: the split goes away but the pane is kept — its GUI
+    client is hidden and its buffer survives, so `pane goto <id>` restores it.
+    The WM owns the policy; we hand it the target window id (pending-var path)."""
+    if args:
+        w = await resolve(vt, args[0])
+        if w is None:
+            print(f"pane min: not found: {args[0]}", file=sys.stderr)
+            return
+    else:
+        w = await vt.current_win()
+    if w is None:
+        return
+    if len(await vt.list_wins()) <= 1:
+        print("pane min: refusing to minimize the only pane", file=sys.stderr)
+        return
+    await vt.set_var("nvwm_minimize_pending", int(w))
+    await vt.notify()
+
+
 COMMANDS = {
     "new":    cmd_new,
     "rename": cmd_rename,
@@ -230,12 +273,13 @@ COMMANDS = {
     "goto":   cmd_goto,
     "swap":   cmd_swap,
     "full":   cmd_full,
+    "min":    cmd_min,
 }
 
 
 async def amain() -> None:
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
-        print("usage: pane {new|rename|ls|swap|full|kill|goto} [args...]",
+        print("usage: pane {new|rename|ls|swap|full|min|kill|goto} [args...]",
               file=sys.stderr)
         sys.exit(1)
     sock = os.environ.get("NVIM")

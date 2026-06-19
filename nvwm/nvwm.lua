@@ -58,6 +58,13 @@ local function used_names()
     local ok, id = pcall(vim.api.nvim_win_get_var, w, "pane_id")
     if ok and id and id ~= "" then used[id] = true end
   end
+  -- minimized panes have no window but keep their name (the WM stashes them in
+  -- g:nvwm_minimized); reserve those too so a new pane can't shadow one and
+  -- clobber its registry entry.
+  local mini = vim.g.nvwm_minimized
+  if type(mini) == "table" then
+    for id in pairs(mini) do used[id] = true end
+  end
   return used
 end
 

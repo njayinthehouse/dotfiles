@@ -353,6 +353,11 @@ class VimTalker:
         buf = await self._req("nvim_win_get_buf", handle)
         if buf is None:
             return None
+        return await self.buf_info(buf)
+
+    async def buf_info(self, buf: int) -> tuple[str, str] | None:
+        """(buffer_name, buftype) for a buffer number. Used to describe a
+        minimized pane, whose window is gone but whose buffer lives on."""
         name = await self._req("nvim_buf_get_name", buf)
         bt = await self._req("nvim_get_option_value", "buftype", {"buf": buf})
         if name is None or bt is None:
@@ -972,6 +977,9 @@ class WindowManager:
         vim_win = self.placements.pop(client_id, None)
         if vim_win is not None:
             await self.vim.close_pane(vim_win)
+        else:
+            # no placement: might be a minimized client the user just closed
+            await self._prune_minimized(client_id)
         if client_id == self.nvim_host_id:
             self.nvim_host_id = None
             self.host_geom = None
@@ -1023,11 +1031,95 @@ class WindowManager:
             return                    # a neovim-only pane has no client to blow up
         await self._set_fullscreen(None if self.fullscreen == cid else cid)
 
+    async def _check_minimize_signal(self) -> None:
+        """Honor `pane min`, which sets g:nvwm_minimize_pending = <winid> and
+        notifies us. We stash the pane's GUI client (hidden, dropped from the
+        placement map so resync leaves it alone), record it in the shared
+        g:nvwm_minimized registry keyed by pane name, then close the split.
+        The neovim buffer survives hidden, so a pure terminal/editor pane is
+        restorable too — its client id is just 0.
+        """
+        req = await self.vim.var("nvwm_minimize_pending")
+        if not req:
+            return
+        await self.vim.set_var("nvwm_minimize_pending", 0)
+        winid = int(req)
+        win = next((w for w in await self.vim.list_wins()
+                    if int(w) == winid), None)
+        if win is None:
+            return
+        name = await self.vim.win_var(win, "pane_id") or str(winid)
+        buf = await self.vim.win_buf(win)
+        cid = next((c for c, wh in self.placements.items()
+                    if int(wh) == winid), 0)
+        if cid:
+            self.placements.pop(cid, None)
+            if self.fullscreen == cid:
+                self.fullscreen = None
+            self.x.hide(cid)
+        mini = await self.vim.var("nvwm_minimized")
+        if not isinstance(mini, dict):
+            mini = {}
+        mini[name] = [buf if buf is not None else 0, cid]
+        await self.vim.set_var("nvwm_minimized", mini)
+        await self.vim.close_pane(win)            # buffer lives on, hidden
+
+    async def _check_restore_signal(self) -> None:
+        """Honor `pane goto <name>` on a minimized pane: it sets
+        g:nvwm_restore_pending = <name> and notifies us. We open a fresh split,
+        re-show the saved buffer, and re-bind the GUI client (if any) so it
+        follows the new window again."""
+        name = await self.vim.var("nvwm_restore_pending")
+        if not name or not isinstance(name, str):
+            return
+        await self.vim.set_var("nvwm_restore_pending", "")
+        mini = await self.vim.var("nvwm_minimized")
+        if not isinstance(mini, dict) or name not in mini:
+            return
+        entry = mini[name]
+        buf, cid = int(entry[0]), int(entry[1])
+        pane = await self.vim.create_split()
+        if pane is None:
+            return
+        win = pane.win
+        empty = await self.vim.win_buf(win)       # throwaway buffer from :vnew
+        if buf:
+            await self.vim.command(
+                f"call win_execute({int(win)}, 'buffer {buf}')")
+            if empty is not None and int(empty) != buf:
+                await self.vim.command(f"silent! bwipeout {int(empty)}")
+        await self.vim.set_win_var(win, "pane_id", name)
+        if cid:
+            self.placements[cid] = win
+            await self.vim.set_win_var(win, "nvwm_gui", cid)
+            self.x.show(cid)
+            self.x.focus(cid)
+        del mini[name]
+        await self.vim.set_var("nvwm_minimized", mini)
+        await self.vim.set_current_win(win)
+        self.poke()
+
+    async def _prune_minimized(self, cid: int) -> None:
+        """Drop any registry entry for a minimized client that has died (the
+        user closed the app while it was minimized), so it stops haunting
+        `pane ls` and `pane goto`."""
+        mini = await self.vim.var("nvwm_minimized")
+        if not isinstance(mini, dict):
+            return
+        stale = [n for n, e in mini.items() if e and int(e[1]) == cid]
+        if not stale:
+            return
+        for n in stale:
+            del mini[n]
+        await self.vim.set_var("nvwm_minimized", mini)
+
     async def resync(self) -> None:
         if self.host_geom is None:
             return
         await self._check_swap_signal()
         await self._check_fullscreen_signal()
+        await self._check_minimize_signal()
+        await self._check_restore_signal()
         fs = self.fullscreen
         if fs is not None and not self.x.is_managed(fs):
             fs = self.fullscreen = None
