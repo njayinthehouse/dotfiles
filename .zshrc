@@ -11,18 +11,19 @@ export PATH="$HOME/.local/bin:$PATH"
 export PATH="$HOME/.local/llvm/bin:$PATH"
 export LD_LIBRARY_PATH="$HOME/.local/llvm/lib/x86_64-unknown-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-# Lean toolchain (elan)
-export PATH="$HOME/.elan/bin:$PATH"
+# Private, non-dotfile aliases (kept out of the `dot` repo).
+[[ -f ~/.zsh_aliases ]] && source ~/.zsh_aliases
 
 # Common aliases
 alias l='ls'
 alias la='ls -a'
 alias ll='ls -l'
 alias lla='ls -l -a'
-alias zshconf='nvim ~/.zsh'
-alias nvimconf='nvim ~/.conf/nvim/init.lua'
+alias zshconf='nvim $HOME/.zsh'
+alias nvimconf='nvim $HOME/.conf/nvim/init.lua'
 alias vim='nvim'
 alias grep='rg'
+alias firefox='firefox >$HOME/.logs/firefox.log 2>&1 &'
 
 # sweettalker — roll/rate terminal looks (fg/bg are job-control builtins, so
 # the colour levers are 'foreground'/'background')
