@@ -126,3 +126,24 @@ for _, key in ipairs({ "i", "a", "I", "A" }) do
   vim.keymap.set("n", key, function() return _G.nvwm_enter_gui(key) end,
     { expr = true, desc = "nvwm: focus GUI client or " .. key })
 end
+
+-- Click-to-enter: a plain left click shouldn't just move focus to a pane, it
+-- should drop straight into that pane's editing mode — mirroring how clicking a
+-- GUI pane hands it the keyboard. neovim's default mouse handling selects the
+-- clicked window on <LeftMouse>; we act on the matching <LeftRelease> (so a
+-- click-drag that builds a visual selection is left untouched) and, for a
+-- terminal or any modifiable buffer, enter Terminal-/Insert-mode. Non-editable
+-- panes (help, quickfix, GUI placeholders, &c.) stay in normal mode. The WM's
+-- WindowManager.on_clicked has already pulled X focus onto the nvim host.
+vim.keymap.set("n", "<LeftRelease>", function()
+  vim.schedule(function()
+    if vim.fn.mode() ~= "n" then return end        -- a drag-selection: leave it
+    local ok, gui = pcall(vim.api.nvim_win_get_var, 0, "nvwm_gui")
+    if ok and gui then return end                  -- GUI placeholder: WM owns it
+    local bt = vim.bo.buftype
+    if bt == "terminal" or (bt == "" and vim.bo.modifiable) then
+      vim.cmd("startinsert")                        -- terminal -> Terminal-mode,
+    end                                             -- file buffer -> Insert-mode
+  end)
+  return "<LeftRelease>"
+end, { expr = true, desc = "nvwm: click a pane to enter its editing mode" })
