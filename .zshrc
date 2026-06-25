@@ -23,7 +23,11 @@ alias zshconf='nvim $HOME/.zsh'
 alias nvimconf='nvim $HOME/.conf/nvim/init.lua'
 alias vim='nvim'
 alias grep='rg'
-alias firefox='firefox >$HOME/.logs/firefox.log 2>&1 &'
+# firefox: detach + log. A function, not an alias: an alias ending in `&` would
+# swallow any URL/file argument (it'd start a fresh command after the `&`) and
+# leaves completion stuck in command position. As a function it passes args
+# through, and zsh's bundled `_mozilla` completion (options + URLs + files) fires.
+firefox() { command firefox "$@" >$HOME/.logs/firefox.log 2>&1 & }
 
 # sweettalker — roll/rate terminal looks (fg/bg are job-control builtins, so
 # the colour levers are 'foreground'/'background')
@@ -87,6 +91,11 @@ setopt SHARE_HISTORY HIST_IGNORE_DUPS HIST_IGNORE_SPACE HIST_VERIFY
 
 # Completion: case-insensitive, menu selection, colourised. zsh-completions
 # drops its functions in $fpath automatically, so compinit just picks them up.
+# Our own tools' completions (_pane/_sesh from nvwm, _sweettalk from
+# sweettalker) self-install into the dir below — keep it on $fpath before
+# compinit. (`dot` needs nothing: it's an alias carrying --git-dir/--work-tree,
+# and zsh's _git reads those off the line to scope completion to the repo.)
+fpath=(~/.local/share/zsh/site-functions $fpath)
 autoload -Uz compinit && compinit
 zstyle ':completion:*' menu select
 zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'
