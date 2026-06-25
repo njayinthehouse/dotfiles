@@ -19,6 +19,13 @@ cp -f "$REPO/sweettalker.py" "$HOME/.local/bin/sweettalk"
 chmod 755 "$HOME/.local/bin/sweettalk"
 echo "installed $HOME/.local/bin/sweettalk"
 
+# zsh completion for `sweettalk` (and its look/<lever>/guess/learned aliases).
+# The dir is on $fpath (see ~/.zshrc), so compinit picks it up next shell.
+mkdir -p "$HOME/.local/share/zsh/site-functions"
+cp -f "$REPO/completions/_sweettalk" "$HOME/.local/share/zsh/site-functions/_sweettalk"
+chmod 644 "$HOME/.local/share/zsh/site-functions/_sweettalk"
+echo "installed $HOME/.local/share/zsh/site-functions/_sweettalk"
+
 ZSHRC="$HOME/.zshrc"
 if ! grep -qF "sweettalker.zsh" "$ZSHRC" 2>/dev/null; then
     printf '\n# sweettalker — RL terminal-look selector\n[ -f %s/sweettalker.zsh ] && source %s/sweettalker.zsh\n' \
