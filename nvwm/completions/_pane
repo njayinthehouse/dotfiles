@@ -1,0 +1,51 @@
+#compdef pane
+# Completion for `pane` — the nvwm pane CLI. Installed to
+# ~/.local/share/zsh/site-functions/_pane by nvwm/install.sh.
+#
+# Pane ids are pulled live from the running neovim (via `pane ls`), so id
+# completion only fires inside nvwm — outside it there's nothing to talk to.
+
+# Live pane ids/names from neovim. `pane ls` prints "<mark> <id>  <name>"; the
+# mark is one char + a space, so drop the first two columns and take the id.
+_pane_ids() {
+  [[ -n $NVIM ]] || return 1
+  local -a ids
+  ids=(${(f)"$(pane ls 2>/dev/null | cut -c3- | awk 'NF{print $1}')"})
+  (( ${#ids} )) || return 1
+  _describe -t panes 'pane id' ids
+}
+
+_pane() {
+  local curcontext="$curcontext" state line
+  local -a cmds
+  cmds=(
+    'new:create a pane, optionally tagged with an id'
+    'rename:rename a pane'
+    'ls:list panes (optional regex filter)'
+    'swap:swap two panes'
+    'full:fullscreen a pane'
+    'min:minimize a pane'
+    'kill:close a pane'
+    'goto:focus a pane by id'
+  )
+
+  _arguments -C \
+    '1: :->cmd' \
+    '*::arg:->args'
+
+  case $state in
+    cmd)
+      _describe -t commands 'pane command' cmds
+      ;;
+    args)
+      case $line[1] in
+        goto|full|min|kill) _arguments '1:pane:_pane_ids' ;;
+        rename)             _arguments '1:pane:_pane_ids' '2:new name:' ;;
+        swap)               _arguments '1:pane:_pane_ids' '2:pane:_pane_ids' ;;
+        # ls takes an optional free-form regex; new takes a free-form id.
+      esac
+      ;;
+  esac
+}
+
+_pane "$@"

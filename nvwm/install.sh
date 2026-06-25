@@ -30,6 +30,11 @@ install_file pane.py  "$HOME/.local/bin/pane"                755
 install_file sesh.py  "$HOME/.local/bin/sesh"                755
 install_file nvwm.lua "$HOME/.config/nvim/plugin/nvwm.lua"   644
 
+# zsh completions for the pane/sesh CLIs. The dir is on $fpath (see ~/.zshrc),
+# so compinit picks these up on the next shell.
+install_file completions/_pane "$HOME/.local/share/zsh/site-functions/_pane"   644
+install_file completions/_sesh "$HOME/.local/share/zsh/site-functions/_sesh"   644
+
 # Stamp the install so .zshrc can tell when the repo has outpaced it and
 # re-run us automatically.
 touch -- "$HOME/.local/bin/.nvwm-installed"

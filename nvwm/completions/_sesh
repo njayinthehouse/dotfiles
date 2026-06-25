@@ -1,0 +1,65 @@
+#compdef sesh
+# Completion for `sesh` — the nvwm session CLI. Installed to
+# ~/.local/share/zsh/site-functions/_sesh by nvwm/install.sh.
+#
+#   load   — saved sessions in ~/.sesh/*.sesh
+#   create — templates in ~/.sesh.templates/*.sesh
+#   switch — live session (tab) names/numbers from the running neovim
+
+# Saved sessions: ~/.sesh/<name>.sesh -> <name>  (:t basename, :r drop .sesh)
+_sesh_saved() {
+  local -a names
+  names=(~/.sesh/*.sesh(N:t:r))
+  (( ${#names} )) && _describe -t sessions 'saved session' names
+}
+
+# Session templates: ~/.sesh.templates/<name>.sesh -> <name>
+_sesh_templates() {
+  local -a names
+  names=(~/.sesh.templates/*.sesh(N:t:r))
+  (( ${#names} )) && _describe -t templates 'template' names
+}
+
+# Live sessions from neovim. `sesh ls` prints "<mark> <n> <name> <npanes>...";
+# drop the mark, then emit the number and (unless "-") the name.
+_sesh_tabs() {
+  [[ -n $NVIM ]] || return 1
+  local -a names
+  names=(${(f)"$(sesh ls 2>/dev/null | cut -c3- | awk 'NF{print $1; if ($2!="-") print $2}')"})
+  (( ${#names} )) || return 1
+  _describe -t sessions 'session' names
+}
+
+_sesh() {
+  local curcontext="$curcontext" state line
+  local -a cmds
+  cmds=(
+    'layout:print the current session layout'
+    'save:save the current session under a name'
+    'load:rebuild a saved session by name'
+    'create:build a session from a template'
+    'new:open a new session (tab)'
+    'ls:list sessions'
+    'switch:switch to a session by name or number'
+  )
+
+  _arguments -C \
+    '1: :->cmd' \
+    '*::arg:->args'
+
+  case $state in
+    cmd)
+      _describe -t commands 'sesh command' cmds
+      ;;
+    args)
+      case $line[1] in
+        load)   _arguments '1:session:_sesh_saved' ;;
+        save)   _arguments '1:session:_sesh_saved' ;;   # existing names = overwrite hints
+        create) _arguments '1:template:_sesh_templates' '*:arg:' ;;
+        switch) _arguments '1:session:_sesh_tabs' ;;
+      esac
+      ;;
+  esac
+}
+
+_sesh "$@"
