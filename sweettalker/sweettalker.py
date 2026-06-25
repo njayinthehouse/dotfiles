@@ -3,9 +3,9 @@
 
 A *look* is generated from scratch, not picked from curated pools. Internally a
 look is a GENOME — a small bundle of perceptual knobs (background lightness/hue,
-a target foreground contrast, a palette hue-shift/chroma, a font + size, and a
+a target foreground contrast, a palette hue-shift/chroma, a font, and a
 compositional prompt) — which DECODE turns into the concrete values the terminal
-consumes: a foreground/background hex, 16 ANSI colours, a font, a size, and a
+consumes: a foreground/background hex, 16 ANSI colours, a font, and a
 zsh PROMPT string. Colours are sampled in OKLCH (a perceptual space) so random
 genomes still look designed, and the foreground's lightness is *solved* to hit a
 target WCAG contrast instead of rejection-sampled.
@@ -28,7 +28,7 @@ Usage:
   sweettalk look [roll [explore|exploit]|duel|refine|auto [on|off]
                   |explore [0..1|auto]|help]
   sweettalk <lever> [roll [explore|exploit]|duel|refine|help]
-                                  lever = prompt|font|size|foreground|
+                                  lever = prompt|font|foreground|
                                           background|palette
   sweettalk guess                 predict the current look's 0-10 rating
 
@@ -37,6 +37,10 @@ Usage:
   Both vary the whole look, or only one lever with `<lever> duel|refine`.
   sweettalk status                show the current look + its predicted rating
   sweettalk learned               show what the model has learned you like
+
+  Font *size* is not a lever: control it yourself with the terminal's zoom
+  (Ctrl+= / Ctrl+- in st). sweettalker only sets the font *family*, leaving
+  whatever size you've zoomed to untouched.
   sweettalk session               startx-session hook (roll if autoroll, apply)
   sweettalk startup               shell-start hook (apply current look)
 """
@@ -55,7 +59,7 @@ STATE = DATA_DIR / "state.json"
 PROMPT_CURRENT = DATA_DIR / "current.zsh"
 
 SCALE = 10
-LEVERS = ["prompt", "font", "size", "foreground", "background", "palette"]
+LEVERS = ["prompt", "font", "foreground", "background", "palette"]
 MIN_CONTRAST = 4.5          # WCAG AA-ish floor we always construct toward
 
 
@@ -150,7 +154,8 @@ def solve_fg_lightness(bg_hex, hue, chroma, target):
 
 
 # ==================================================================== font lever
-# Family is discrete (must be installed); size is continuous. Attribute tables
+# Family is discrete (must be installed). Size is *not* a genome knob — it's left
+# to the terminal's own zoom (Ctrl+= / Ctrl+- in st). Attribute tables
 # (ligature/bitmap/width/style) feed the reward model's features.
 WEIGHTS = {
     "thin", "th", "extralight", "extlt", "ultralight", "ultlt", "ulight",
@@ -242,9 +247,6 @@ def _font_attrs(family):
     }
 
 
-SIZE_MIN, SIZE_MAX = 9.0, 18.0
-
-
 # ============================================================= prompt (compositional)
 # A prompt is composed from segments + a trailing glyph, each coloured by an ANSI
 # index (so the prompt automatically tracks the generated palette). The genome
@@ -322,8 +324,7 @@ def random_genome():
                     "chroma": random.uniform(0.07, 0.17),
                     "normal_L": random.uniform(0.45, 0.66),
                     "bright_dL": random.uniform(0.08, 0.22)},
-        "font": {"family": random.choice(font_values()),
-                 "size": round(random.uniform(SIZE_MIN, SIZE_MAX) * 2) / 2},
+        "font": {"family": random.choice(font_values())},
         "prompt": _rand_prompt(),
     }
 
@@ -339,9 +340,7 @@ def mutate_genome(genome, lever):
     elif lever == "palette":
         g["palette"] = fresh["palette"]
     elif lever == "font":
-        g["font"]["family"] = fresh["font"]["family"]   # family only; keep size
-    elif lever == "size":
-        g["font"]["size"] = fresh["font"]["size"]
+        g["font"]["family"] = fresh["font"]["family"]
     elif lever == "prompt":
         g["prompt"] = fresh["prompt"]
     return g
@@ -375,8 +374,8 @@ def perturb_genome(genome, lever=None):
     """A small local *tweak* of a genome (for `refine`), not a fresh re-roll.
     Continuous knobs get gaussian nudges (clamped to valid ranges); discrete ones
     (font family, prompt shape) flip occasionally. With a lever, only that lever
-    is nudged; without one, colours always shift slightly and size/prompt sometimes
-    do — font is left alone in whole-look refine since a family swap isn't subtle."""
+    is nudged; without one, colours always shift slightly and the prompt sometimes
+    does — font is left alone in whole-look refine since a family swap isn't subtle."""
     g = json.loads(json.dumps(genome))
     whole = lever is None
 
@@ -399,10 +398,6 @@ def perturb_genome(genome, lever=None):
         p["chroma"] = _clamp(p["chroma"] + random.gauss(0, 0.015), 0.05, 0.20)
         p["normal_L"] = _clamp(p["normal_L"] + random.gauss(0, 0.03), 0.40, 0.70)
         p["bright_dL"] = _clamp(p["bright_dL"] + random.gauss(0, 0.03), 0.05, 0.25)
-    if lever == "size" or (whole and random.random() < 0.4):
-        step = random.choice([-1.0, -0.5, 0.5, 1.0])
-        g["font"]["size"] = _clamp(round((g["font"]["size"] + step) * 2) / 2,
-                                   SIZE_MIN, SIZE_MAX)
     if lever == "font":                              # can't nudge a family; pick a neighbour
         fams = [x for x in font_values() if x != g["font"]["family"]]
         if fams:
@@ -465,7 +460,7 @@ def decode(genome):
     normal, bright = _decode_palette(genome, bg, fg)
     return {
         "fg": fg, "bg": bg, "ansi": normal + bright,
-        "font": genome["font"]["family"], "size": genome["font"]["size"],
+        "font": genome["font"]["family"],
         "prompt_str": _decode_prompt(genome),
         "prompt_meta": dict(genome["prompt"]),
     }
@@ -477,7 +472,7 @@ def show_look(look, genome=None):
     print(f"  prompt     {segs}  {pm['glyph']}"
           f"{'  2-line' if pm.get('two_line') else ''}"
           f"{'  status' if pm.get('status_glyph') else ''}")
-    print(f"  font       {look['font']}  {look['size']}pt")
+    print(f"  font       {look['font']}")
     print(f"  foreground {look['fg']}   (contrast {contrast(look['fg'], look['bg']):.1f})")
     print(f"  background {look['bg']}")
     print(f"  palette    {' '.join(look['ansi'][1:7])}")
@@ -512,9 +507,6 @@ def feature_vector(look):
     a = _font_attrs(look["font"])
     f += [1.0 if a[k] else 0.0 for k in
           ("ligatures", "bitmap", "wide", "narrow", "slab", "handwritten")]
-    sz = float(look["size"])
-    f += [(sz - SIZE_MIN) / (SIZE_MAX - SIZE_MIN),
-          1.0 if sz <= 10 else 0.0, 1.0 if sz >= 16 else 0.0]
     pm = look["prompt_meta"]
     segs = pm.get("segments", [])
     f += [0.0 if pm.get("two_line") else 1.0,        # one_line
@@ -536,7 +528,6 @@ FEATURE_NAMES = (
      "pal.L", "pal.C", "pal.bright_gap",
      "font.ligatures", "font.bitmap", "font.wide", "font.narrow",
      "font.slab", "font.handwritten",
-     "size.norm", "size.tiny", "size.large",
      "prompt.one_line", "prompt.git", "prompt.time", "prompt.load",
      "prompt.host", "prompt.user", "prompt.n_segs", "prompt.status_glyph"]
     + [f"glyph.{c}" for c in GLYPH_CLASSES])
@@ -738,7 +729,7 @@ def normalize_legacy_look(old):
     # via the same detectors. Unknown names degrade to a path+chevron prompt.
     body = old.get("_prompt_body", "%~ ❯ ")
     return {"fg": old["foreground"], "bg": old["background"], "ansi": list(pal),
-            "font": old["font"], "size": float(old["size"]),
+            "font": old["font"],
             "prompt_meta": _legacy_prompt_meta(body)}
 
 
@@ -913,9 +904,10 @@ def _st_tty():
 
 
 def st_osc(look):
-    """OSC escapes painting a look onto st: font+size (OSC 50), fg (10), bg (11),
-    and the 16 ANSI colours (OSC 4;n). BEL-terminated. Pure: no I/O."""
-    seqs = [f'\033]50;{look["font"]}:size={float(look["size"])}\007',
+    """OSC escapes painting a look onto st: font family (OSC 50), fg (10), bg (11),
+    and the 16 ANSI colours (OSC 4;n). BEL-terminated. Pure: no I/O. No size is
+    sent — st keeps whatever size you've zoomed to (Ctrl+= / Ctrl+-)."""
+    seqs = [f'\033]50;{look["font"]}\007',
             f'\033]10;{look["fg"]}\007',
             f'\033]11;{look["bg"]}\007']
     seqs += [f'\033]4;{i};{c}\007' for i, c in enumerate(look["ansi"])]
@@ -1074,7 +1066,7 @@ def cmd_lever(name, args):
         g = ensure_current(load_all())
         look = decode(g)
         vals = {"prompt": look["prompt_meta"], "font": look["font"],
-                "size": look["size"], "foreground": look["fg"],
+                "foreground": look["fg"],
                 "background": look["bg"], "palette": " ".join(look["ansi"][1:7])}
         print(vals[name])
         return 0
@@ -1181,8 +1173,7 @@ def _humanize(name):
         "font.ligatures": "ligature fonts", "font.bitmap": "bitmap fonts",
         "font.wide": "wide fonts", "font.narrow": "narrow fonts",
         "font.slab": "slab fonts", "font.handwritten": "handwritten fonts",
-        "size.norm": "larger size", "size.tiny": "tiny size",
-        "size.large": "large size", "prompt.one_line": "one-line prompt",
+        "prompt.one_line": "one-line prompt",
         "prompt.git": "git in prompt", "prompt.time": "time in prompt",
         "prompt.load": "load in prompt", "prompt.host": "host in prompt",
         "prompt.user": "user in prompt", "prompt.n_segs": "busy prompt",

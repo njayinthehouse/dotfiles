@@ -4,16 +4,19 @@ Generate, rate, and learn whole terminal **looks** — an RL look-generator that
 builds looks from scratch, learns your taste from pairwise comparisons, and can
 **guess how much you'll like any look**.
 
-A *look* spans six levers:
+A *look* spans five levers:
 
 | Lever | What it sets | Applied via |
 |---|---|---|
 | `prompt` | the zsh prompt (composed from segments) | `current.zsh` (PROMPT) |
 | `font` | st font family | OSC 50 |
-| `size` | font size | OSC 50 |
 | `foreground` | text colour | st default fg (OSC 10) |
 | `background` | window colour | st default bg (OSC 11) |
 | `palette` | the 16 ANSI colours | st palette (OSC 4) |
+
+Font **size** is not a lever — it's yours to control with the terminal's zoom
+(`Ctrl+=` / `Ctrl+-` in st). sweettalk sets only the font *family* (OSC 50
+without a size), so st keeps whatever size you've zoomed to across rolls.
 
 Unlike v1 (which picked each lever from a curated list), v2 **generates** looks
 from a *genome* — a small bundle of perceptual knobs that `decode` turns into the
@@ -52,7 +55,7 @@ sh install.sh        # binary + .zshrc source line (self-installs on repo change
     closest to your current look (a coin-flip outcome) and high posterior
     uncertainty. That's the comparison that teaches the model the most.
   - **`refine`** instead pits the current look against a small local *tweak* of
-    itself (gaussian nudges to colours, occasional size/prompt flips), for
+    itself (gaussian nudges to colours, occasional prompt flips), for
     polishing a theme you already like. `<lever> refine` nudges just that lever.
   - Winner sticks: the look you prefer becomes current (tie/skip leaves it).
 - **Guess a rating.** `guess` predicts the current look's **0–10** rating as its
@@ -85,7 +88,7 @@ sh install.sh        # binary + .zshrc source line (self-installs on repo change
 | `guess` | predict the current look's 0–10 rating |
 | `learned` | show what the model has learned you like/dislike |
 
-`look`, `prompt`, `font`, `size`, `foreground`, `background`, `palette`, `guess`,
+`look`, `prompt`, `font`, `foreground`, `background`, `palette`, `guess`,
 and `learned` are aliases in `~/.zshrc`. (Colour levers are `foreground` /
 `background`, not `fg`/`bg`, which are zsh job-control builtins.)
 
@@ -102,9 +105,9 @@ green/red on the last command's exit status.
   list of pairwise `comparisons`, autoroll flag, and exploration-rate override.
 - **Genome → decode:** colours in OKLCH (background lightness/hue, a foreground
   contrast target, a palette hue-shift/chroma anchored to the background so the
-  16 ANSI colours are coherent yet keep red≈red); a font family + continuous
-  size; a compositional prompt (ordered segments + glyph + layout, coloured by
-  ANSI index so the prompt tracks the palette).
+  16 ANSI colours are coherent yet keep red≈red); a font family (size is left to
+  the terminal's zoom); a compositional prompt (ordered segments + glyph + layout,
+  coloured by ANSI index so the prompt tracks the palette).
 - **Apply:** the prompt goes to `current.zsh` (re-sourced live by the precmd
   hook); colours/font are painted onto the live st via OSC escapes.
 

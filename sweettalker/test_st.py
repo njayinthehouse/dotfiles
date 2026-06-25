@@ -79,8 +79,8 @@ def test_policy_explore_exploit_flip():
 def test_lever_mutation_isolated():
     random.seed(2)
     g = st.random_genome()
-    assert st.mutate_genome(g, "font")["font"]["size"] == g["font"]["size"]
-    assert st.mutate_genome(g, "size")["font"]["family"] == g["font"]["family"]
+    assert "size" not in st.LEVERS                 # size is the terminal's job now
+    assert "size" not in g["font"]                 # not a genome knob
     for lev, key in (("foreground", "fg"), ("background", "bg"),
                      ("prompt", "prompt"), ("palette", "palette")):
         m = st.mutate_genome(g, lev)
